@@ -6,8 +6,22 @@
  * what makes this app testable by one person.
  */
 
+import crypto from 'node:crypto';
+
 import { httpError, publicMessage, publicUser } from './store.js';
 import { isChannelMuted, isQuietHoursActive, routeMessage } from './notifications.js';
+import {
+  findMove,
+  gameStatus,
+  isInCheck,
+  legalMoves,
+  makeMove,
+  moveToSan,
+  parseFen,
+  repetitionKey,
+  squareName,
+  toFen,
+} from './chess.js';
 
 export function createRouter({ store, hub }) {
   const routes = [
@@ -28,6 +42,13 @@ export function createRouter({ store, hub }) {
 
     ['GET', /^\/api\/dms\/([\w]+)\/messages$/, getDirectMessages],
     ['POST', /^\/api\/dms\/([\w]+)\/messages$/, postDirectMessage],
+
+    ['POST', /^\/api\/games$/, challenge],
+    ['GET', /^\/api\/games\/([\w]+)$/, getGame],
+    ['POST', /^\/api\/games\/([\w]+)\/accept$/, acceptGame],
+    ['POST', /^\/api\/games\/([\w]+)\/decline$/, declineGame],
+    ['POST', /^\/api\/games\/([\w]+)\/moves$/, playMove],
+    ['POST', /^\/api\/games\/([\w]+)\/resign$/, resignGame],
 
     ['POST', /^\/api\/read$/, markRead],
     ['GET', /^\/api\/notifications$/, getNotifications],
@@ -86,7 +107,10 @@ export function createRouter({ store, hub }) {
       users: store.listUsers().filter((u) => u.id !== user.id)
         .map((u) => publicUser(u, { online: store.isOnline(u.id) })),
       channels: channelViews(user),
-      dms: store.listDmThreads(user.id),
+      dms: store.listDmThreads(user.id).map((thread) => ({
+        ...thread,
+        game: gameSummary(user.id, store.activeGameIn(thread.conversationId)),
+      })),
       notifications: store.listNotifications(user.id),
       serverTime: Date.now(),
     };
@@ -269,6 +293,252 @@ export function createRouter({ store, hub }) {
     }
   }
 
+  // -------------------------------------------------------------------- chess
+
+  /**
+   * A game lives in the direct-message thread between two people, so the thread
+   * decides who may see and touch it. One live game per thread at a time.
+   */
+  function challenge({ user, body }) {
+    requireAuth(user);
+    const opponent = store.getUser(body.opponentId);
+    if (!opponent) throw httpError(404, 'Unknown user.');
+    if (opponent.id === user.id) throw httpError(400, 'You need someone to play against.');
+
+    const conversationId = store.dmConversationId(user.id, opponent.id);
+    store.ensureDmConversation(user.id, opponent.id);
+    if (store.activeGameIn(conversationId)) {
+      throw httpError(409, 'You already have a game going with them.');
+    }
+
+    // Colours are drawn, not chosen -- otherwise the challenger always picks white.
+    const challengerIsWhite = crypto.randomInt(2) === 0;
+    const game = store.createGame({
+      conversationId,
+      whiteId: challengerIsWhite ? user.id : opponent.id,
+      blackId: challengerIsWhite ? opponent.id : user.id,
+      createdBy: user.id,
+    });
+
+    announceGame(game);
+    notifyAboutGame(game, opponent.id, {
+      title: `${user.name} challenged you to chess`,
+      preview: `You play ${game.white === opponent.id ? 'white' : 'black'}.`,
+    });
+    return { game: gameView(user.id, game) };
+  }
+
+  function getGame({ user, params }) {
+    requireAuth(user);
+    return { game: gameView(user.id, mustPlay(params[0], user)) };
+  }
+
+  function acceptGame({ user, params }) {
+    requireAuth(user);
+    const game = mustPlay(params[0], user);
+    if (game.status !== 'pending') throw httpError(409, 'That challenge is no longer open.');
+    if (game.createdBy === user.id) throw httpError(403, 'Wait for them to accept.');
+
+    game.status = 'active';
+    store.saveGame(game);
+    announceGame(game);
+    // Whoever moves first should hear about it.
+    const mover = game.white;
+    if (mover !== user.id) notifyTurn(game, mover);
+    return { game: gameView(user.id, game) };
+  }
+
+  function declineGame({ user, params }) {
+    requireAuth(user);
+    const game = mustPlay(params[0], user);
+    if (game.status !== 'pending') throw httpError(409, 'That challenge is no longer open.');
+    finish(game, { state: 'declined', reason: 'declined', by: user.id });
+    return { game: gameView(user.id, game) };
+  }
+
+  function playMove({ user, params, body }) {
+    requireAuth(user);
+    const game = mustPlay(params[0], user);
+    if (game.status !== 'active') throw httpError(409, 'That game is not running.');
+
+    const position = parseFen(game.fen);
+    const color = colorFor(game, user.id);
+    if (color !== position.turn) throw httpError(409, 'It is not your move.');
+
+    const from = squareIndex(body.from);
+    const to = squareIndex(body.to);
+    const move = findMove(position, from, to, body.promotion ?? null);
+    // The server owns legality. A client cannot talk it into an illegal move.
+    if (!move) throw httpError(400, 'That is not a legal move.');
+
+    const san = moveToSan(position, move);
+    const next = makeMove(position, move);
+
+    game.fen = toFen(next);
+    game.history.push(repetitionKey(next));
+    game.lastMove = { from, to };
+    game.moves.push({
+      san,
+      from,
+      to,
+      uci: squareName(from) + squareName(to) + (move.promotion ?? ''),
+      by: user.id,
+      ts: Date.now(),
+    });
+
+    const outcome = gameStatus(next, game.history);
+    if (outcome.state === 'checkmate' || outcome.state === 'stalemate' || outcome.state === 'draw') {
+      finish(game, outcome, san);
+      return { game: gameView(user.id, game) };
+    }
+
+    store.saveGame(game);
+    announceGame(game);
+    notifyTurn(game, opponentOf(game, user.id), san, outcome.state === 'check');
+    return { game: gameView(user.id, game) };
+  }
+
+  function resignGame({ user, params }) {
+    requireAuth(user);
+    const game = mustPlay(params[0], user);
+    if (game.status === 'finished') throw httpError(409, 'That game is already over.');
+    finish(game, {
+      state: 'resigned',
+      reason: 'resignation',
+      winner: colorFor(game, opponentOf(game, user.id)),
+      by: user.id,
+    });
+    return { game: gameView(user.id, game) };
+  }
+
+  function finish(game, result, san = null) {
+    game.status = 'finished';
+    game.result = result;
+    store.saveGame(game);
+    announceGame(game);
+
+    for (const playerId of [game.white, game.black]) {
+      notifyAboutGame(game, playerId, {
+        title: 'Your chess game ended',
+        preview: describeResult(game, playerId, result, san),
+      });
+    }
+  }
+
+  function describeResult(game, viewerId, result, san) {
+    const mine = colorFor(game, viewerId);
+    const opponentName = store.getUser(opponentOf(game, viewerId))?.name ?? 'your opponent';
+    const prefix = san ? `${san} — ` : '';
+    if (result.state === 'declined') return `${opponentName} declined the challenge.`;
+    if (result.state === 'stalemate') return `${prefix}Stalemate. It is a draw.`;
+    if (result.state === 'draw') return `${prefix}Draw by ${result.reason.replace(/-/g, ' ')}.`;
+    if (result.state === 'resigned') {
+      return result.by === viewerId ? 'You resigned.' : `${opponentName} resigned. You win.`;
+    }
+    return result.winner === mine ? `${prefix}Checkmate. You win.` : `${prefix}Checkmate. You lose.`;
+  }
+
+  function notifyTurn(game, playerId, san = null, check = false) {
+    const opponentName = store.getUser(opponentOf(game, playerId))?.name ?? 'your opponent';
+    notifyAboutGame(game, playerId, {
+      title: 'Your move',
+      preview: san ? `${opponentName} played ${san}${check ? ' — you are in check' : ''}.` : 'The game has started.',
+      replace: true,
+    });
+  }
+
+  /**
+   * Games are between two people, so they notify like a direct message: channel
+   * mutes cannot touch them, quiet hours can silence them. "Your move" replaces
+   * itself so a long game leaves one entry rather than one per move.
+   */
+  function notifyAboutGame(game, playerId, { title, preview, replace = false }) {
+    const player = store.getUser(playerId);
+    if (!player) return;
+    const decision = routeMessage({ scope: 'direct', recipient: player, mentions: [playerId] });
+
+    const notification = {
+      id: store.newId('n'),
+      kind: 'direct',
+      conversationId: game.conversationId,
+      gameId: game.id,
+      messageId: null,
+      scope: 'direct',
+      from: { id: opponentOf(game, playerId), name: store.getUser(opponentOf(game, playerId))?.name ?? 'chess' },
+      channel: null,
+      preview: `♟ ${title} — ${preview}`,
+      ts: Date.now(),
+      read: false,
+      alert: decision.alert,
+      bypassedMute: false,
+      silencedByQuietHours: decision.silencedByQuietHours,
+      reason: decision.reason,
+    };
+
+    const stored = replace
+      ? store.replaceGameNotification(playerId, game.id, notification)
+      : store.addNotification(playerId, notification);
+    hub.send(playerId, 'notification', { notification: stored });
+  }
+
+  function announceGame(game) {
+    for (const playerId of [game.white, game.black]) {
+      hub.send(playerId, 'game', { game: gameView(playerId, game) });
+    }
+  }
+
+  function gameView(viewerId, game) {
+    const position = parseFen(game.fen);
+    const color = colorFor(game, viewerId);
+    const yourTurn = game.status === 'active' && color === position.turn;
+
+    return {
+      id: game.id,
+      conversationId: game.conversationId,
+      status: game.status,
+      result: game.result,
+      white: playerStub(game.white),
+      black: playerStub(game.black),
+      fen: game.fen,
+      turn: position.turn,
+      // The client renders squares, not FEN -- it has no engine and needs none.
+      board: position.board,
+      moves: game.moves.map((move) => ({ san: move.san, from: move.from, to: move.to })),
+      lastMove: game.lastMove,
+      check: isInCheck(position),
+      yourColor: color,
+      yourTurn,
+      createdBy: game.createdBy,
+      // Only the side to move is told what it may do.
+      legalMoves: yourTurn
+        ? legalMoves(position).map((move) => ({ from: move.from, to: move.to, promotion: move.promotion ?? null }))
+        : [],
+      createdAt: game.createdAt,
+      updatedAt: game.updatedAt,
+    };
+  }
+
+  const playerStub = (userId) => {
+    const player = store.getUser(userId);
+    return { id: userId, name: player?.name ?? 'unknown', online: store.isOnline(userId) };
+  };
+
+  const colorFor = (game, userId) => (game.white === userId ? 'w' : game.black === userId ? 'b' : null);
+  const opponentOf = (game, userId) => (game.white === userId ? game.black : game.white);
+
+  function mustPlay(gameId, user) {
+    const game = store.getGame(gameId);
+    if (!game) throw httpError(404, 'Unknown game.');
+    if (game.white !== user.id && game.black !== user.id) throw httpError(403, 'That is not your game.');
+    return game;
+  }
+
+  function squareIndex(value) {
+    const index = Number(value);
+    if (!Number.isInteger(index) || index < 0 || index > 63) throw httpError(400, 'Squares are 0–63.');
+    return index;
+  }
+
   // ------------------------------------------------------------ read & inbox
 
   function markRead({ user, body }) {
@@ -361,6 +631,13 @@ export function createRouter({ store, hub }) {
       lastMessage: last,
       ...counts,
     };
+  }
+
+  /** Just enough for the sidebar to show whose move it is. */
+  function gameSummary(viewerId, game) {
+    if (!game) return null;
+    const view = gameView(viewerId, game);
+    return { id: view.id, status: view.status, yourTurn: view.yourTurn, yourColor: view.yourColor };
   }
 
   const channelViews = (user) => store.listChannels().map((c) => channelView(user, c));

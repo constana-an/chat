@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createApp } from '../server/index.js';
 import { formatClock } from '../server/notifications.js';
+import { parseSquare } from '../server/chess.js';
 
 /** Boot a throwaway server (no persistence) and return a small client. */
 const PASSWORD = 'correct-horse-battery';
@@ -568,5 +569,204 @@ test('an account created before passwords is claimed on first sign-in', async ()
     // From here on it behaves like any other account.
     assert.equal((await call(null, 'POST', '/api/session',
       { username: 'ada', password: 'something-else' })).status, 401);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────  chess  ──
+
+/** Challenge, accept, and hand back a client for each colour. */
+async function startedGame(signIn) {
+  const ada = await signIn('ada');
+  const grace = await signIn('grace');
+  const created = await ada.call('POST', '/api/games', { opponentId: grace.user.id });
+  assert.equal(created.status, 200, created.error);
+  await grace.call('POST', `/api/games/${created.game.id}/accept`);
+
+  const byId = { [ada.user.id]: ada, [grace.user.id]: grace };
+  const game = created.game;
+  return {
+    ada, grace, gameId: game.id,
+    white: byId[game.white.id],
+    black: byId[game.black.id],
+  };
+}
+
+const move = (client, gameId, from, to, promotion) =>
+  client.call('POST', `/api/games/${gameId}/moves`, {
+    from: parseSquare(from), to: parseSquare(to), ...(promotion ? { promotion } : {}),
+  });
+
+test('a challenge assigns both colours and waits to be accepted', async () => {
+  await withServer(async ({ signIn }) => {
+    const ada = await signIn('ada');
+    const grace = await signIn('grace');
+
+    const { game } = await ada.call('POST', '/api/games', { opponentId: grace.user.id });
+    assert.equal(game.status, 'pending');
+    assert.notEqual(game.white.id, game.black.id, 'two different people');
+    assert.deepEqual([game.white.id, game.black.id].sort(), [ada.user.id, grace.user.id].sort());
+    assert.equal(game.turn, 'w');
+    assert.equal(game.moves.length, 0);
+
+    // The challenger cannot wave their own challenge through.
+    assert.equal((await ada.call('POST', `/api/games/${game.id}/accept`)).status, 403);
+
+    const accepted = await grace.call('POST', `/api/games/${game.id}/accept`);
+    assert.equal(accepted.game.status, 'active');
+
+    // The opponent hears about it like a direct message.
+    const [notification] = (await grace.call('GET', '/api/notifications')).notifications;
+    assert.match(notification.preview, /challenged you to chess/);
+    assert.equal(notification.kind, 'direct');
+    assert.equal(notification.gameId, game.id);
+  });
+});
+
+test('only one live game per pair, and only the players can touch it', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, gameId } = await startedGame(signIn);
+    const mallory = await signIn('mallory');
+
+    assert.equal((await ada.call('POST', '/api/games', { opponentId: grace.user.id })).status, 409);
+    assert.equal((await ada.call('POST', '/api/games', { opponentId: ada.user.id })).status, 400,
+      'you cannot play yourself');
+
+    assert.equal((await mallory.call('GET', `/api/games/${gameId}`)).status, 403);
+    assert.equal((await move(mallory, gameId, 'e2', 'e4')).status, 403);
+  });
+});
+
+test('the server owns legality: only real moves, only on your turn', async () => {
+  await withServer(async ({ signIn }) => {
+    const { gameId, white, black } = await startedGame(signIn);
+
+    assert.equal((await move(black, gameId, 'e7', 'e5')).status, 409, 'black cannot open');
+    assert.equal((await move(white, gameId, 'e2', 'e5')).status, 400, 'pawns do not jump three');
+    assert.equal((await move(white, gameId, 'e1', 'e2')).status, 400, 'the king is boxed in');
+
+    const played = await move(white, gameId, 'e2', 'e4');
+    assert.equal(played.status, 200);
+    assert.equal(played.game.moves.at(-1).san, 'e4', 'the move list reads as a scoresheet');
+    assert.equal(played.game.turn, 'b');
+    assert.equal(played.game.yourTurn, false, 'white has handed the move over');
+
+    // Only the side to move is told what it may do.
+    const blackView = await black.call('GET', `/api/games/${gameId}`);
+    assert.equal(blackView.game.yourTurn, true);
+    assert.ok(blackView.game.legalMoves.length > 0);
+    assert.equal(played.game.legalMoves.length, 0, 'white is told nothing while waiting');
+  });
+});
+
+test("fool's mate ends the game and names the winner", async () => {
+  await withServer(async ({ signIn }) => {
+    const { gameId, white, black } = await startedGame(signIn);
+
+    await move(white, gameId, 'f2', 'f3');
+    await move(black, gameId, 'e7', 'e5');
+    await move(white, gameId, 'g2', 'g4');
+    const mate = await move(black, gameId, 'd8', 'h4');
+
+    assert.equal(mate.game.status, 'finished');
+    assert.equal(mate.game.result.state, 'checkmate');
+    assert.equal(mate.game.result.winner, 'b');
+    assert.equal(mate.game.moves.at(-1).san, 'Qh4#', 'SAN carries the mate marker');
+
+    // A finished game accepts nothing more.
+    assert.equal((await move(white, gameId, 'a2', 'a3')).status, 409);
+
+    const told = (await white.call('GET', '/api/notifications')).notifications;
+    assert.ok(told.some((n) => /Checkmate\. You lose\./.test(n.preview)), 'the loser is told plainly');
+  });
+});
+
+test('resigning and declining both end things cleanly', async () => {
+  await withServer(async ({ signIn }) => {
+    const resigned = await startedGame(signIn);
+    const out = await resigned.white.call('POST', `/api/games/${resigned.gameId}/resign`);
+    assert.equal(out.game.status, 'finished');
+    assert.equal(out.game.result.state, 'resigned');
+    assert.equal(out.game.result.winner, 'b', 'white resigned, so black wins');
+
+    const notified = (await resigned.black.call('GET', '/api/notifications')).notifications;
+    assert.ok(notified.some((n) => /resigned\. You win\./.test(n.preview)));
+  });
+
+  await withServer(async ({ signIn }) => {
+    const ada = await signIn('ada');
+    const grace = await signIn('grace');
+    const { game } = await ada.call('POST', '/api/games', { opponentId: grace.user.id });
+
+    const declined = await grace.call('POST', `/api/games/${game.id}/decline`);
+    assert.equal(declined.game.status, 'finished');
+    assert.equal(declined.game.result.state, 'declined');
+    // With nothing live, a fresh challenge is allowed again.
+    assert.equal((await ada.call('POST', '/api/games', { opponentId: grace.user.id })).status, 200);
+  });
+});
+
+test('"your move" replaces itself instead of stacking up', async () => {
+  await withServer(async ({ signIn }) => {
+    const { gameId, white, black } = await startedGame(signIn);
+
+    const openings = [['e2', 'e4'], ['e7', 'e5'], ['g1', 'f3'], ['b8', 'c6'], ['f1', 'c4'], ['g8', 'f6']];
+    for (const [from, to] of openings) {
+      const mover = (await white.call('GET', `/api/games/${gameId}`)).game.yourTurn ? white : black;
+      assert.equal((await move(mover, gameId, from, to)).status, 200, `${from}${to}`);
+    }
+
+    for (const player of [white, black]) {
+      const turns = (await player.call('GET', '/api/notifications')).notifications
+        .filter((n) => n.gameId === gameId && !n.read && /Your move/.test(n.preview));
+      assert.ok(turns.length <= 1, `six moves left ${turns.length} unread turn notices`);
+    }
+  });
+});
+
+test('both players are pushed every position over the event stream', async () => {
+  await withServer(async ({ signIn, openStream }) => {
+    const { gameId, white, black } = await startedGame(signIn);
+    const whiteStream = await openStream(white.token);
+    const blackStream = await openStream(black.token);
+    await waitFor(whiteStream, 'hello');
+    await waitFor(blackStream, 'hello');
+
+    await move(white, gameId, 'd2', 'd4');
+
+    for (const [label, stream] of [['white', whiteStream], ['black', blackStream]]) {
+      const event = await waitFor(stream, 'game');
+      assert.equal(event.data.game.moves.at(-1).san, 'd4', `${label} saw the move`);
+      assert.equal(event.data.game.board[parseSquare('d4')], 'P', `${label} got the new position`);
+    }
+
+    // Each side is told about its own turn, not the other's.
+    const whiteGame = whiteStream.events.filter((e) => e.type === 'game').at(-1).data.game;
+    const blackGame = blackStream.events.filter((e) => e.type === 'game').at(-1).data.game;
+    assert.equal(whiteGame.yourTurn, false);
+    assert.equal(blackGame.yourTurn, true);
+    assert.equal(whiteGame.yourColor, 'w');
+    assert.equal(blackGame.yourColor, 'b');
+
+    whiteStream.close();
+    blackStream.close();
+  });
+});
+
+test('the sidebar learns whose move it is', async () => {
+  await withServer(async ({ signIn }) => {
+    const { gameId, white, black } = await startedGame(signIn);
+
+    const threadFor = async (client, otherName) =>
+      (await client.call('GET', '/api/state')).dms.find((t) => t.username === otherName);
+
+    const whiteName = (await white.call('GET', '/api/session')).user.name;
+    const blackName = (await black.call('GET', '/api/session')).user.name;
+
+    assert.equal((await threadFor(white, blackName)).game.yourTurn, true);
+    assert.equal((await threadFor(black, whiteName)).game.yourTurn, false);
+
+    await move(white, gameId, 'e2', 'e4');
+    assert.equal((await threadFor(white, blackName)).game.yourTurn, false);
+    assert.equal((await threadFor(black, whiteName)).game.yourTurn, true);
   });
 });

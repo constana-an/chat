@@ -17,6 +17,7 @@ import {
   parseMentions,
   sanitizeQuietHours,
 } from './notifications.js';
+import { initialPosition, repetitionKey, toFen } from './chess.js';
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -53,6 +54,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     notifications: new Map(),// userId -> notification[]
     online: new Map(),       // userId -> connection count
     loginFailures: new Map(),// username -> {count, until} -- deliberately not persisted
+    games: new Map(),        // gameId -> game
   };
 
   let saveTimer = null;
@@ -82,6 +84,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       for (const c of raw.conversations ?? []) state.conversations.set(c.id, c);
       for (const [k, v] of Object.entries(raw.reads ?? {})) state.reads.set(k, v);
       for (const [k, v] of Object.entries(raw.notifications ?? {})) state.notifications.set(k, v);
+      for (const game of raw.games ?? []) state.games.set(game.id, game);
       return true;
     } catch (err) {
       console.warn(`[store] could not read ${dataFile}: ${err.message} — starting fresh`);
@@ -101,6 +104,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       conversations: [...state.conversations.values()],
       reads: Object.fromEntries(state.reads),
       notifications: Object.fromEntries(state.notifications),
+      games: [...state.games.values()],
     };
   }
 
@@ -469,6 +473,17 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
 
   const listNotifications = (userId) => [...(state.notifications.get(userId) ?? [])].reverse();
 
+  /**
+   * "Your move" should not stack. Drop any unread notice still pointing at this
+   * game before adding the new one, so a 40-move game leaves one entry, not 40.
+   */
+  function replaceGameNotification(userId, gameId, notification) {
+    const list = state.notifications.get(userId) ?? [];
+    const kept = list.filter((entry) => !(entry.gameId === gameId && !entry.read));
+    state.notifications.set(userId, kept);
+    return addNotification(userId, notification);
+  }
+
   function markNotificationsRead(userId, ids = null) {
     const list = state.notifications.get(userId) ?? [];
     for (const n of list) {
@@ -476,6 +491,54 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     }
     save();
     return list.filter((n) => !n.read).length;
+  }
+
+  // -------------------------------------------------------------------- games
+
+  /**
+   * A game belongs to the direct-message thread between its two players, so
+   * there is exactly one place it can be found and exactly two people who can
+   * touch it.
+   */
+  function createGame({ conversationId, whiteId, blackId, createdBy }) {
+    const start = initialPosition();
+    const game = {
+      id: id('g'),
+      conversationId,
+      white: whiteId,
+      black: blackId,
+      createdBy,
+      fen: toFen(start),
+      // Every position that has occurred, so threefold repetition can be seen.
+      history: [repetitionKey(start)],
+      moves: [],
+      lastMove: null,
+      status: 'pending',
+      result: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    state.games.set(game.id, game);
+    save();
+    return game;
+  }
+
+  const getGame = (gameId) => state.games.get(gameId);
+
+  /** Newest first; a thread usually has one live game and a pile of old ones. */
+  const listGamesIn = (conversationId) =>
+    [...state.games.values()]
+      .filter((game) => game.conversationId === conversationId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const activeGameIn = (conversationId) =>
+    listGamesIn(conversationId).find((game) => game.status !== 'finished') ?? null;
+
+  function saveGame(game) {
+    game.updatedAt = Date.now();
+    state.games.set(game.id, game);
+    save();
+    return game;
   }
 
   // ----------------------------------------------------------------- presence
@@ -527,7 +590,8 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     postChannelMessage, postDirectMessage, history,
     unreadFor, markRead,
     setChannelMute, setQuietHours,
-    addNotification, listNotifications, markNotificationsRead,
+    addNotification, listNotifications, markNotificationsRead, replaceGameNotification,
+    createGame, getGame, listGamesIn, activeGameIn, saveGame,
     setOnline, isOnline,
     newId: id,
     save,

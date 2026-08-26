@@ -18,8 +18,8 @@ at once.
 npm test
 ```
 
-31 tests: the notification rules in isolation, plus an end-to-end pass over the HTTP
-API and the event stream.
+Tests cover the notification rules and the chess rules in isolation, plus an end-to-end
+pass over the HTTP API and the event stream.
 
 ## What it does
 
@@ -34,6 +34,7 @@ API and the event stream.
 | Channel mutes | `PATCH /api/channels/:id/prefs` |
 | Quiet hours, in the user's own timezone | `PATCH /api/settings/quiet-hours` |
 | Live updates, presence, toasts | SSE at `GET /api/events` |
+| Chess against the person you are messaging | `POST /api/games`, `/moves`, `/resign` |
 
 ## The notification policy
 
@@ -74,6 +75,26 @@ Quiet-hours windows may wrap past midnight (`22:00 → 08:00`), and are evaluate
 against a timezone offset the client reports on connect, so a window means the same
 thing to a user in Tokyo as to one in Berlin.
 
+## Chess
+
+A game lives inside the direct-message thread between two people -- one live game per pair.
+Challenge from the `♟ Chess` button in a DM header; colours are drawn at random.
+
+The rules live in [`server/chess.js`](server/chess.js) as pure functions over a FEN-shaped
+position, in the same spirit as the notification policy: no store, no clock, no I/O. That
+is what makes them testable, and they are tested the only way a move generator can be
+honestly tested -- **perft**, counting the whole move tree against the published node
+counts for six standard positions, including the ones that exist specifically to catch
+castling, en-passant and promotion bugs.
+
+Castling, en passant, promotion (including underpromotion), check, checkmate, stalemate,
+and draws by threefold repetition, the fifty-move rule and insufficient material are all
+implemented. Legality is decided only on the server; the client is sent the list of moves
+it may make and has no engine of its own.
+
+Not implemented, deliberately: clocks, a computer opponent, takebacks, draw offers, and
+spectating from a channel.
+
 ## How it fits together
 
 ```
@@ -81,6 +102,7 @@ server/
   index.js          HTTP server, JSON body parsing, static files
   routes.js         the API; fans each new message out to its audience
   notifications.js  mentions, mutes, quiet hours — pure, no I/O
+  chess.js          the rules of chess — pure, no I/O, perft-tested
   store.js          in-memory data + JSON persistence to data/db.json
   hub.js            server-sent-events, one stream per open tab
 public/
@@ -89,6 +111,7 @@ public/
   app.js            client: state, rendering, event stream, composer
 tests/
   notifications.test.js   the rules, in isolation
+  chess.test.js           perft, plus every rule that perft cannot see
   api.test.js             end-to-end over HTTP and the event stream
 ```
 

@@ -16,6 +16,9 @@ const state = {
   messages: new Map(),         // conversationId -> message[]
   notifications: [],
   current: null,               // {kind:'channel'|'dm', id, conversationId}
+  game: null,                  // 当前私信里的棋局视图
+  chessFrom: null,             // 选中的格子
+  chessPromotion: null,        // {from, to} 等待选择升变棋子
   markers: new Map(),          // conversationId -> seq of the "new messages" line
   streamAbort: null,
 };
@@ -184,6 +187,7 @@ function onEvent(type, data) {
     case 'notifications:read': return onNotificationsRead(data);
     case 'prefs': return onPrefs(data);
     case 'presence': return onPresence(data);
+    case 'game': return onGame(data.game);
     case 'user:joined': return onUserJoined(data.user);
     case 'channel:created': return onChannelCreated(data.channel);
     case 'channel:membership': return onMembership(data);
@@ -373,6 +377,11 @@ function dmItem(userId, thread) {
   item.classList.toggle('unread', (thread?.unread ?? 0) > 0);
   const dot = el('span', `presence${user?.online ? ' online' : ''}`);
   item.append(dot, el('span', 'label', name));
+  if (thread?.game?.yourTurn) {
+    const turn = el('span', 'turn-dot', '♟');
+    turn.title = 'Your move';
+    item.append(turn);
+  }
   if (thread?.unread > 0) item.append(countBadge(thread.unread, 'alert', `${thread.unread} unread`));
   item.onclick = () => openDm(userId);
   return item;
@@ -449,6 +458,14 @@ function renderHeader() {
     header.append(title);
     header.append(el('div', 'topic', 'Direct message — never muted'));
     header.append(el('div', 'spacer'));
+
+    const thread = state.dms.get(state.current.id);
+    const chess = el('button', `chip${thread?.game?.yourTurn ? ' on' : ''}`,
+      thread?.game?.yourTurn ? '♟ Your move' : '♟ Chess');
+    chess.title = 'Play a game of chess';
+    chess.onclick = openChess;
+    header.append(chess);
+
     header.append(el('span', 'muted', user?.online ? 'online' : 'offline'));
   }
 }
@@ -569,6 +586,9 @@ async function openChannel(channelId) {
 }
 
 async function openDm(userId) {
+  state.game = null;
+  state.chessFrom = null;
+  state.chessPromotion = null;
   const data = await api('GET', `/api/dms/${userId}/messages`);
   state.current = { kind: 'dm', id: userId, conversationId: data.conversationId };
   state.messages.set(data.conversationId, data.messages);
@@ -887,6 +907,7 @@ function openPanel(id) {
 function closePanels() {
   $('inbox-panel').hidden = true;
   $('settings-panel').hidden = true;
+  $('chess-panel').hidden = true;
   $('scrim').hidden = true;
 }
 $('scrim').addEventListener('click', closePanels);
@@ -944,6 +965,271 @@ function showToast(notification) {
   };
   $('toasts').append(toast);
   setTimeout(() => toast.remove(), 6000);
+}
+
+// ────────────────────────────────  chess  ────────────────────────────────
+
+/**
+ * 棋规完全在服务端。客户端只画服务端给的 64 格，并且只允许服务端
+ * 明确列为合法的走法 —— 这里没有引擎，也不需要有。
+ */
+const PIECE_GLYPH = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
+const pieceColor = (piece) => (piece === piece.toUpperCase() ? 'w' : 'b');
+
+async function openChess() {
+  if (state.current?.kind !== 'dm') return;
+  const thread = state.dms.get(state.current.id);
+  state.chessFrom = null;
+  state.chessPromotion = null;
+
+  if (thread?.game?.id && state.game?.id !== thread.game.id) {
+    try {
+      state.game = (await api('GET', `/api/games/${thread.game.id}`)).game;
+    } catch { state.game = null; }
+  }
+  renderChess();
+  openPanel('chess-panel');
+}
+
+function onGame(game) {
+  const thread = [...state.dms.values()].find((t) => t.conversationId === game.conversationId);
+  if (!thread) {
+    // 对方刚发起挑战，这个私信线程本地还不存在
+    refreshState().catch(() => {});
+    return;
+  }
+  thread.game = game.status === 'finished'
+    ? null
+    : { id: game.id, status: game.status, yourTurn: game.yourTurn, yourColor: game.yourColor };
+
+  if (state.current?.kind === 'dm' && state.current.conversationId === game.conversationId) {
+    state.game = game;
+    state.chessFrom = null;
+    state.chessPromotion = null;
+    renderChess();
+  }
+  renderSidebar();
+  if (state.current?.kind === 'dm') renderHeader();
+}
+
+function renderChess() {
+  const body = $('chess-body');
+  body.replaceChildren();
+
+  if (state.current?.kind !== 'dm') {
+    body.append(emptyState('Chess', 'Open a direct message to play someone.'));
+    return;
+  }
+
+  const opponent = state.users.get(state.current.id);
+  const name = opponent?.name ?? 'them';
+  const game = state.game;
+
+  if (!game) {
+    body.append(emptyState('No game yet', `Challenge @${name} to a game of chess.`));
+    body.append(actions([['Challenge ' + name, 'primary', challengeOpponent]]));
+    return;
+  }
+
+  if (game.status === 'pending') {
+    const yours = game.createdBy === state.me.id;
+    const color = game.yourColor === 'w' ? 'white' : 'black';
+    body.append(el('p', 'chess-empty', yours
+      ? `Waiting for @${name} to accept. You drew ${color}.`
+      : `@${name} challenged you. You play ${color}.`));
+    body.append(actions(yours
+      ? [['Cancel', '', () => gameAction('decline')]]
+      : [['Accept', 'primary', () => gameAction('accept')], ['Decline', '', () => gameAction('decline')]]));
+    return;
+  }
+
+  const wrap = el('div', 'chess');
+  wrap.append(seats(game));
+  if (state.chessPromotion) wrap.append(promotionPicker());
+  wrap.append(boardNode(game));
+  wrap.append(statusLine(game, name));
+  if (game.moves.length) wrap.append(moveList(game));
+
+  wrap.append(actions(game.status === 'finished'
+    ? [['New game', 'primary', challengeOpponent]]
+    : [['Resign', '', () => { if (confirm('Resign this game?')) gameAction('resign'); }]]));
+
+  body.append(wrap);
+}
+
+function seats(game) {
+  const box = el('div', 'chess-players');
+  for (const color of ['w', 'b']) {
+    const player = color === 'w' ? game.white : game.black;
+    const seat = el('div', `chess-seat${game.status === 'active' && game.turn === color ? ' turn' : ''}`);
+    seat.append(el('span', `swatch ${color}`), el('span', 'who', player.name));
+    if (player.id === state.me.id) seat.append(el('span', 'you', 'you'));
+    box.append(seat);
+  }
+  return box;
+}
+
+function boardNode(game) {
+  const flipped = game.yourColor === 'b';
+  const board = el('div', 'board');
+
+  const targets = new Map();
+  if (game.yourTurn && state.chessFrom != null) {
+    for (const move of game.legalMoves) {
+      if (move.from !== state.chessFrom) continue;
+      if (!targets.has(move.to)) targets.set(move.to, []);
+      targets.get(move.to).push(move);
+    }
+  }
+  const movable = new Set(game.legalMoves.map((move) => move.from));
+
+  for (let i = 0; i < 64; i++) {
+    const index = flipped ? 63 - i : i;
+    const file = index % 8;
+    const rank = (index / 8) | 0;
+    const square = el('button', `sq ${(file + rank) % 2 === 0 ? 'light' : 'dark'}`);
+    square.type = 'button';
+
+    const piece = game.board[index];
+    if (piece !== '.') {
+      square.append(el('span', `piece ${pieceColor(piece)}`, PIECE_GLYPH[piece.toLowerCase()]));
+      if (game.check && piece.toLowerCase() === 'k' && pieceColor(piece) === game.turn) {
+        square.classList.add('check');
+      }
+    }
+    if (game.lastMove && (index === game.lastMove.from || index === game.lastMove.to)) {
+      square.classList.add('last');
+    }
+    if (index === state.chessFrom) square.classList.add('selected');
+    if (targets.has(index)) {
+      square.classList.add('playable');
+      if (piece !== '.') square.classList.add('capture');
+      square.append(el('span', 'hint'));
+    } else if (movable.has(index)) {
+      square.classList.add('playable');
+    }
+
+    square.onclick = () => onSquare(index, targets);
+    board.append(square);
+  }
+  return board;
+}
+
+function onSquare(index, targets) {
+  const game = state.game;
+  if (!game || !game.yourTurn) return;
+
+  const moves = targets.get(index);
+  if (moves?.length) {
+    // 升变时同一个目标格有四种走法，得先问清楚变成什么
+    if (moves.some((move) => move.promotion)) {
+      state.chessPromotion = { from: state.chessFrom, to: index };
+      renderChess();
+      return;
+    }
+    submitMove(state.chessFrom, index, null);
+    return;
+  }
+
+  state.chessFrom = game.legalMoves.some((move) => move.from === index) ? index : null;
+  state.chessPromotion = null;
+  renderChess();
+}
+
+function promotionPicker() {
+  const box = el('div', 'promotion');
+  box.append(el('span', 'label', 'Promote to'));
+  for (const piece of ['q', 'r', 'b', 'n']) {
+    const button = el('button', null, PIECE_GLYPH[piece]);
+    button.type = 'button';
+    button.title = { q: 'Queen', r: 'Rook', b: 'Bishop', n: 'Knight' }[piece];
+    button.onclick = () => submitMove(state.chessPromotion.from, state.chessPromotion.to, piece);
+    box.append(button);
+  }
+  return box;
+}
+
+function statusLine(game, name) {
+  if (game.status === 'finished') {
+    return el('div', 'chess-status over', describeGameResult(game, name));
+  }
+  const check = game.check ? ' — check' : '';
+  return game.yourTurn
+    ? el('div', 'chess-status your-turn', `Your move${check}.`)
+    : el('div', 'chess-status', `Waiting for @${name}${check}.`);
+}
+
+function describeGameResult(game, name) {
+  const result = game.result ?? {};
+  if (result.state === 'declined') return 'The challenge was declined.';
+  if (result.state === 'stalemate') return 'Stalemate — a draw.';
+  if (result.state === 'draw') return `Draw by ${String(result.reason).replace(/-/g, ' ')}.`;
+  if (result.state === 'resigned') {
+    return result.by === state.me.id ? 'You resigned.' : `@${name} resigned — you win.`;
+  }
+  if (result.state === 'checkmate') {
+    return result.winner === game.yourColor ? 'Checkmate — you win.' : 'Checkmate — you lose.';
+  }
+  return 'Game over.';
+}
+
+function moveList(game) {
+  const box = el('div', 'chess-moves');
+  game.moves.forEach((move, index) => {
+    if (index % 2 === 0) box.append(el('span', 'no', `${index / 2 + 1}.`));
+    box.append(el('span', 'san', move.san));
+  });
+  box.scrollTop = box.scrollHeight;
+  return box;
+}
+
+function actions(buttons) {
+  const row = el('div', 'chess-actions');
+  for (const [label, className, onClick] of buttons) {
+    const button = el('button', className || 'chip', label);
+    button.type = 'button';
+    button.onclick = onClick;
+    row.append(button);
+  }
+  return row;
+}
+
+async function submitMove(from, to, promotion) {
+  state.chessFrom = null;
+  state.chessPromotion = null;
+  try {
+    state.game = (await api('POST', `/api/games/${state.game.id}/moves`, { from, to, promotion })).game;
+  } catch (err) {
+    flashChess(err.message);
+  }
+  renderChess();
+}
+
+async function challengeOpponent() {
+  try {
+    state.game = (await api('POST', '/api/games', { opponentId: state.current.id })).game;
+    renderChess();
+  } catch (err) {
+    flashChess(err.message);
+  }
+}
+
+async function gameAction(action) {
+  try {
+    state.game = (await api('POST', `/api/games/${state.game.id}/${action}`)).game;
+    if (action === 'decline') state.game = null;
+    renderChess();
+  } catch (err) {
+    flashChess(err.message);
+  }
+}
+
+function flashChess(message) {
+  const body = $('chess-body');
+  const note = el('div', 'chess-status', message);
+  note.style.borderColor = 'var(--red)';
+  body.prepend(note);
+  setTimeout(() => note.remove(), 3500);
 }
 
 /** A short, quiet blip. Silently does nothing if audio is unavailable. */
