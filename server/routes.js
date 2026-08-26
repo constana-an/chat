@@ -22,6 +22,7 @@ import {
   squareName,
   toFen,
 } from './chess.js';
+import { isChoice, matchWinner, resolveRound } from './games.js';
 
 export function createRouter({ store, hub }) {
   const routes = [
@@ -48,6 +49,7 @@ export function createRouter({ store, hub }) {
     ['POST', /^\/api\/games\/([\w]+)\/accept$/, acceptGame],
     ['POST', /^\/api\/games\/([\w]+)\/decline$/, declineGame],
     ['POST', /^\/api\/games\/([\w]+)\/moves$/, playMove],
+    ['POST', /^\/api\/games\/([\w]+)\/throw$/, throwRps],
     ['POST', /^\/api\/games\/([\w]+)\/resign$/, resignGame],
 
     ['POST', /^\/api\/read$/, markRead],
@@ -109,7 +111,8 @@ export function createRouter({ store, hub }) {
       channels: channelViews(user),
       dms: store.listDmThreads(user.id).map((thread) => ({
         ...thread,
-        game: gameSummary(user.id, store.activeGameIn(thread.conversationId)),
+        game: gameSummary(user.id, store.activeGameIn(thread.conversationId, 'chess')),
+        rps: rpsSummary(user.id, store.activeGameIn(thread.conversationId, 'rps')),
       })),
       notifications: store.listNotifications(user.id),
       serverTime: Date.now(),
@@ -307,7 +310,10 @@ export function createRouter({ store, hub }) {
 
     const conversationId = store.dmConversationId(user.id, opponent.id);
     store.ensureDmConversation(user.id, opponent.id);
-    if (store.activeGameIn(conversationId)) {
+
+    if (body.kind === 'rps') return startRps({ user, opponent, conversationId });
+
+    if (store.activeGameIn(conversationId, 'chess')) {
       throw httpError(409, 'You already have a game going with them.');
     }
 
@@ -326,6 +332,98 @@ export function createRouter({ store, hub }) {
       preview: `You play ${game.white === opponent.id ? 'white' : 'black'}.`,
     });
     return { game: gameView(user.id, game) };
+  }
+
+  /**
+   * Rock-paper-scissors needs no accept step -- it is one click to join in, so
+   * the challenge simply starts the match.
+   */
+  function startRps({ user, opponent, conversationId }) {
+    if (store.activeGameIn(conversationId, 'rps')) {
+      throw httpError(409, 'You already have a round going with them.');
+    }
+    const game = store.createRpsGame({
+      conversationId,
+      players: [user.id, opponent.id],
+      createdBy: user.id,
+    });
+    announceGame(game);
+    notifyAboutGame(game, opponent.id, {
+      title: `${user.name} started rock-paper-scissors`,
+      preview: `First to ${game.target} wins. Pick one.`,
+    });
+    return { game: gameView(user.id, game) };
+  }
+
+  function throwRps({ user, params, body }) {
+    requireAuth(user);
+    const game = mustPlay(params[0], user);
+    if (game.kind !== 'rps') throw httpError(400, 'That game is chess.');
+    if (game.status !== 'active') throw httpError(409, 'That match is over.');
+    if (!isChoice(body.choice)) throw httpError(400, 'Throw rock, paper or scissors.');
+    if (game.throws[user.id]) throw httpError(409, 'You have already thrown this round.');
+
+    game.throws[user.id] = body.choice;
+    const opponentId = opponentOf(game, user.id);
+
+    if (!game.throws[opponentId]) {
+      // Only one throw is in. Save it, tell them it is their turn, and say
+      // nothing about what it was.
+      store.saveGame(game);
+      announceGame(game);
+      notifyAboutGame(game, opponentId, {
+        title: 'Rock-paper-scissors',
+        preview: `${user.name} has thrown. Your turn.`,
+        replace: true,
+      });
+      return { game: gameView(user.id, game) };
+    }
+
+    const round = resolveRound(
+      { id: user.id, choice: game.throws[user.id] },
+      { id: opponentId, choice: game.throws[opponentId] },
+    );
+    game.rounds.push({ ...round, at: Date.now() });
+    if (round.winner) game.scores[round.winner]++;
+    game.throws = {};
+
+    const champion = matchWinner(game.scores, game.target);
+    if (champion) {
+      finishRps(game, { state: 'won', winner: champion });
+    } else {
+      store.saveGame(game);
+      announceGame(game);
+      for (const playerId of game.players) {
+        notifyAboutGame(game, playerId, {
+          title: 'Rock-paper-scissors',
+          preview: roundLine(game, playerId, round),
+          replace: true,
+        });
+      }
+    }
+    return { game: gameView(user.id, game) };
+  }
+
+  function finishRps(game, result) {
+    game.status = 'finished';
+    game.result = result;
+    store.saveGame(game);
+    announceGame(game);
+    for (const playerId of game.players) {
+      notifyAboutGame(game, playerId, {
+        title: 'Rock-paper-scissors ended',
+        preview: result.winner === playerId
+          ? `You win ${game.scores[playerId]}–${game.scores[opponentOf(game, playerId)]}.`
+          : `You lose ${game.scores[playerId]}–${game.scores[opponentOf(game, playerId)]}.`,
+      });
+    }
+  }
+
+  function roundLine(game, playerId, round) {
+    const mine = round.throws[playerId];
+    const theirs = round.throws[opponentOf(game, playerId)];
+    const verdict = round.tie ? 'a tie' : round.winner === playerId ? 'you win it' : 'you lose it';
+    return `${mine} vs ${theirs} — ${verdict}. ${game.scores[playerId]}–${game.scores[opponentOf(game, playerId)]}.`;
   }
 
   function getGame({ user, params }) {
@@ -402,6 +500,10 @@ export function createRouter({ store, hub }) {
     requireAuth(user);
     const game = mustPlay(params[0], user);
     if (game.status === 'finished') throw httpError(409, 'That game is already over.');
+    if (game.kind === 'rps') {
+      finishRps(game, { state: 'resigned', winner: opponentOf(game, user.id), by: user.id });
+      return { game: gameView(user.id, game) };
+    }
     finish(game, {
       state: 'resigned',
       reason: 'resignation',
@@ -417,7 +519,7 @@ export function createRouter({ store, hub }) {
     store.saveGame(game);
     announceGame(game);
 
-    for (const playerId of [game.white, game.black]) {
+    for (const playerId of playersOf(game)) {
       notifyAboutGame(game, playerId, {
         title: 'Your chess game ended',
         preview: describeResult(game, playerId, result, san),
@@ -466,7 +568,7 @@ export function createRouter({ store, hub }) {
       scope: 'direct',
       from: { id: opponentOf(game, playerId), name: store.getUser(opponentOf(game, playerId))?.name ?? 'chess' },
       channel: null,
-      preview: `♟ ${title} — ${preview}`,
+      preview: `${(game.kind ?? 'chess') === 'rps' ? '✊' : '♟'} ${title} — ${preview}`,
       ts: Date.now(),
       read: false,
       alert: decision.alert,
@@ -482,18 +584,20 @@ export function createRouter({ store, hub }) {
   }
 
   function announceGame(game) {
-    for (const playerId of [game.white, game.black]) {
+    for (const playerId of playersOf(game)) {
       hub.send(playerId, 'game', { game: gameView(playerId, game) });
     }
   }
 
   function gameView(viewerId, game) {
+    if ((game.kind ?? 'chess') === 'rps') return rpsView(viewerId, game);
     const position = parseFen(game.fen);
     const color = colorFor(game, viewerId);
     const yourTurn = game.status === 'active' && color === position.turn;
 
     return {
       id: game.id,
+      kind: 'chess',
       conversationId: game.conversationId,
       status: game.status,
       result: game.result,
@@ -518,18 +622,53 @@ export function createRouter({ store, hub }) {
     };
   }
 
+  /**
+   * The whole game turns on one thing: an opponent's pending throw never
+   * leaves the server. The viewer is told *that* they have thrown, never what.
+   * Resolved rounds are public -- by then both choices are out.
+   */
+  function rpsView(viewerId, game) {
+    const opponentId = opponentOf(game, viewerId);
+    const yourThrow = game.throws[viewerId] ?? null;
+
+    return {
+      id: game.id,
+      kind: 'rps',
+      conversationId: game.conversationId,
+      status: game.status,
+      result: game.result,
+      target: game.target,
+      you: playerStub(viewerId),
+      opponent: playerStub(opponentId),
+      yourScore: game.scores[viewerId] ?? 0,
+      opponentScore: game.scores[opponentId] ?? 0,
+      yourThrow,
+      opponentHasThrown: Boolean(game.throws[opponentId]),
+      waitingForYou: game.status === 'active' && !yourThrow,
+      rounds: game.rounds.map((round) => ({
+        yours: round.throws[viewerId],
+        theirs: round.throws[opponentId],
+        outcome: round.tie ? 'tie' : round.winner === viewerId ? 'win' : 'loss',
+      })),
+      createdBy: game.createdBy,
+      createdAt: game.createdAt,
+      updatedAt: game.updatedAt,
+    };
+  }
+
   const playerStub = (userId) => {
     const player = store.getUser(userId);
     return { id: userId, name: player?.name ?? 'unknown', online: store.isOnline(userId) };
   };
 
   const colorFor = (game, userId) => (game.white === userId ? 'w' : game.black === userId ? 'b' : null);
-  const opponentOf = (game, userId) => (game.white === userId ? game.black : game.white);
+  const playersOf = (game) => ((game.kind ?? 'chess') === 'rps' ? game.players : [game.white, game.black]);
+  const opponentOf = (game, userId) => playersOf(game).find((id) => id !== userId) ?? userId;
 
   function mustPlay(gameId, user) {
     const game = store.getGame(gameId);
     if (!game) throw httpError(404, 'Unknown game.');
-    if (game.white !== user.id && game.black !== user.id) throw httpError(403, 'That is not your game.');
+    if (!playersOf(game).includes(user.id)) throw httpError(403, 'That is not your game.');
     return game;
   }
 
@@ -638,6 +777,12 @@ export function createRouter({ store, hub }) {
     if (!game) return null;
     const view = gameView(viewerId, game);
     return { id: view.id, status: view.status, yourTurn: view.yourTurn, yourColor: view.yourColor };
+  }
+
+  function rpsSummary(viewerId, game) {
+    if (!game) return null;
+    const view = rpsView(viewerId, game);
+    return { id: view.id, status: view.status, waitingForYou: view.waitingForYou };
   }
 
   const channelViews = (user) => store.listChannels().map((c) => channelView(user, c));

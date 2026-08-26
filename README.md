@@ -35,6 +35,8 @@ pass over the HTTP API and the event stream.
 | Quiet hours, in the user's own timezone | `PATCH /api/settings/quiet-hours` |
 | Live updates, presence, toasts | SSE at `GET /api/events` |
 | Chess against the person you are messaging | `POST /api/games`, `/moves`, `/resign` |
+| Rock-paper-scissors, best of three | `POST /api/games` with `kind: 'rps'`, `/throw` |
+| Dice in any conversation | `/roll`, `/roll d20`, `/roll 3d6` in the composer |
 
 ## The notification policy
 
@@ -95,6 +97,22 @@ it may make and has no engine of its own.
 Not implemented, deliberately: clocks, a computer opponent, takebacks, draw offers, and
 spectating from a channel.
 
+## The two small games
+
+**Rock-paper-scissors** is best of three inside a DM. The whole thing turns on one
+property: an opponent's pending throw never leaves the server. The view handed to each
+player says only *that* the other has thrown, never what -- a visible choice is not a
+game. That is asserted for all three throws, against both the API response and the event
+stream, in [`tests/api.test.js`](tests/api.test.js).
+
+**Dice** are a `/roll` in the composer: `/roll`, `/roll d20`, `/roll 3d6`. A roll becomes a
+message with `kind: 'roll'` rather than a line of text, so it rides the whole existing
+pipeline for free -- history, unread counts, the event stream, persistence -- and counts
+as ordinary channel activity, which means it notifies nobody.
+
+Both sets of rules live in [`server/games.js`](server/games.js) as pure functions with the
+randomness injected, so the dice can be tested without hoping they land the right way.
+
 ## How it fits together
 
 ```
@@ -103,6 +121,7 @@ server/
   routes.js         the API; fans each new message out to its audience
   notifications.js  mentions, mutes, quiet hours — pure, no I/O
   chess.js          the rules of chess — pure, no I/O, perft-tested
+  games.js          rock-paper-scissors and dice — pure, randomness injected
   store.js          in-memory data + JSON persistence to data/db.json
   hub.js            server-sent-events, one stream per open tab
 public/
@@ -112,6 +131,7 @@ public/
 tests/
   notifications.test.js   the rules, in isolation
   chess.test.js           perft, plus every rule that perft cannot see
+  games.test.js           every pairing of throws, and dice that stay in range
   api.test.js             end-to-end over HTTP and the event stream
 ```
 

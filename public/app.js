@@ -17,6 +17,7 @@ const state = {
   notifications: [],
   current: null,               // {kind:'channel'|'dm', id, conversationId}
   game: null,                  // 当前私信里的棋局视图
+  rps: null,                   // 当前私信里的石头剪刀布视图
   chessFrom: null,             // 选中的格子
   chessPromotion: null,        // {from, to} 等待选择升变棋子
   markers: new Map(),          // conversationId -> seq of the "new messages" line
@@ -382,6 +383,11 @@ function dmItem(userId, thread) {
     turn.title = 'Your move';
     item.append(turn);
   }
+  if (thread?.rps?.waitingForYou) {
+    const throwNow = el('span', 'turn-dot', '✊');
+    throwNow.title = 'Your throw';
+    item.append(throwNow);
+  }
   if (thread?.unread > 0) item.append(countBadge(thread.unread, 'alert', `${thread.unread} unread`));
   item.onclick = () => openDm(userId);
   return item;
@@ -466,6 +472,12 @@ function renderHeader() {
     chess.onclick = openChess;
     header.append(chess);
 
+    const rps = el('button', `chip${thread?.rps?.waitingForYou ? ' on' : ''}`,
+      thread?.rps?.waitingForYou ? '✊ Your throw' : '✊ RPS');
+    rps.title = 'Rock, paper, scissors';
+    rps.onclick = openRps;
+    header.append(rps);
+
     header.append(el('span', 'muted', user?.online ? 'online' : 'offline'));
   }
 }
@@ -535,11 +547,37 @@ function messageNode(message, previous) {
     meta.append(el('span', 'author', message.authorName), el('span', 'time', shortTime(message.ts)));
     body.append(meta);
   }
-  const text = el('div', 'text');
-  text.innerHTML = renderText(message.text);
-  body.append(text);
+  if (message.kind === 'roll' && message.roll) {
+    body.append(rollNode(message.roll));
+  } else {
+    const text = el('div', 'text');
+    text.innerHTML = renderText(message.text);
+    body.append(text);
+  }
   node.append(body);
   return node;
+}
+
+/** 六面骰用骰面字形，其他面数用数字牌 —— d20 没有对应的字符。 */
+const DIE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+
+function rollNode(roll) {
+  const box = el('div', 'roll');
+  const dice = el('div', 'dice');
+  for (const value of roll.values) {
+    dice.append(roll.sides === 6
+      ? el('span', 'die', DIE_FACES[value - 1])
+      : el('span', 'face', String(value)));
+  }
+  box.append(dice);
+
+  if (roll.values.length > 1) {
+    const total = el('span', 'total');
+    total.append(document.createTextNode('= '), el('b', null, String(roll.total)));
+    box.append(total);
+  }
+  box.append(el('span', 'notation', roll.notation));
+  return box;
 }
 
 function renderText(raw) {
@@ -587,6 +625,7 @@ async function openChannel(channelId) {
 
 async function openDm(userId) {
   state.game = null;
+  state.rps = null;
   state.chessFrom = null;
   state.chessPromotion = null;
   const data = await api('GET', `/api/dms/${userId}/messages`);
@@ -908,6 +947,7 @@ function closePanels() {
   $('inbox-panel').hidden = true;
   $('settings-panel').hidden = true;
   $('chess-panel').hidden = true;
+  $('rps-panel').hidden = true;
   $('scrim').hidden = true;
 }
 $('scrim').addEventListener('click', closePanels);
@@ -998,16 +1038,27 @@ function onGame(game) {
     refreshState().catch(() => {});
     return;
   }
-  thread.game = game.status === 'finished'
-    ? null
-    : { id: game.id, status: game.status, yourTurn: game.yourTurn, yourColor: game.yourColor };
+  const open = state.current?.kind === 'dm' && state.current.conversationId === game.conversationId;
+  const live = game.status !== 'finished';
 
-  if (state.current?.kind === 'dm' && state.current.conversationId === game.conversationId) {
-    state.game = game;
-    state.chessFrom = null;
-    state.chessPromotion = null;
-    renderChess();
+  if (game.kind === 'rps') {
+    thread.rps = live ? { id: game.id, status: game.status, waitingForYou: game.waitingForYou } : null;
+    if (open) {
+      state.rps = game;
+      renderRps();
+    }
+  } else {
+    thread.game = live
+      ? { id: game.id, status: game.status, yourTurn: game.yourTurn, yourColor: game.yourColor }
+      : null;
+    if (open) {
+      state.game = game;
+      state.chessFrom = null;
+      state.chessPromotion = null;
+      renderChess();
+    }
   }
+
   renderSidebar();
   if (state.current?.kind === 'dm') renderHeader();
 }
@@ -1229,6 +1280,157 @@ function flashChess(message) {
   const note = el('div', 'chess-status', message);
   note.style.borderColor = 'var(--red)';
   body.prepend(note);
+  setTimeout(() => note.remove(), 3500);
+}
+
+// ─────────────────────  rock, paper, scissors  ───────────────────────────
+
+const HAND = { rock: '✊', paper: '✋', scissors: '✌️' };
+
+async function openRps() {
+  if (state.current?.kind !== 'dm') return;
+  const thread = state.dms.get(state.current.id);
+
+  if (thread?.rps?.id && state.rps?.id !== thread.rps.id) {
+    try {
+      state.rps = (await api('GET', `/api/games/${thread.rps.id}`)).game;
+    } catch { state.rps = null; }
+  }
+  renderRps();
+  openPanel('rps-panel');
+}
+
+function renderRps() {
+  const body = $('rps-body');
+  body.replaceChildren();
+
+  if (state.current?.kind !== 'dm') {
+    body.append(emptyState('Rock, paper, scissors', 'Open a direct message to play someone.'));
+    return;
+  }
+
+  const name = state.users.get(state.current.id)?.name ?? 'them';
+  const game = state.rps;
+
+  if (!game) {
+    body.append(emptyState('No match yet', `Play @${name} — first to two wins.`));
+    body.append(actions([[`Play ${name}`, 'primary', startRpsMatch]]));
+    return;
+  }
+
+  const wrap = el('div', 'rps');
+  wrap.append(rpsScore(game, name));
+
+  const done = game.status === 'finished';
+  const last = game.rounds.at(-1) ?? null;
+
+  if (game.yourThrow || done) {
+    // 自己出过之后就把手亮出来；对方那只在双方都出完之前一直是问号
+    wrap.append(rpsReveal(game, last, done));
+  }
+
+  if (!done && game.waitingForYou) {
+    const row = el('div', 'rps-throws');
+    for (const choice of ['rock', 'paper', 'scissors']) {
+      const button = el('button', null, HAND[choice]);
+      button.type = 'button';
+      button.title = choice;
+      button.setAttribute('aria-label', choice);
+      button.onclick = () => throwHand(choice);
+      row.append(button);
+    }
+    wrap.append(row);
+  }
+
+  wrap.append(rpsStatus(game, name, done));
+  if (game.rounds.length) wrap.append(rpsRounds(game));
+  wrap.append(actions(done ? [['Play again', 'primary', startRpsMatch]] : []));
+
+  body.append(wrap);
+}
+
+function rpsScore(game, name) {
+  const box = el('div', 'rps-score');
+  const mine = el('div', `side${game.yourScore > game.opponentScore ? ' leading' : ''}`);
+  mine.append(el('div', 'name', 'you'), el('div', 'wins', String(game.yourScore)));
+  const theirs = el('div', `side${game.opponentScore > game.yourScore ? ' leading' : ''}`);
+  theirs.append(el('div', 'name', name), el('div', 'wins', String(game.opponentScore)));
+
+  const middle = el('div', 'side');
+  middle.append(el('div', 'dash', '—'), el('div', 'target', `first to ${game.target}`));
+
+  box.append(mine, middle, theirs);
+  return box;
+}
+
+function rpsReveal(game, last, done) {
+  const box = el('div', 'rps-reveal');
+  const revealed = Boolean(last) && !game.yourThrow;
+
+  const mine = revealed || done ? HAND[last?.yours] ?? '·' : HAND[game.yourThrow] ?? '·';
+  box.append(el('div', 'hand', mine));
+  box.append(el('div', 'vs', 'vs'));
+
+  if (revealed || done) {
+    box.append(el('div', 'hand', HAND[last?.theirs] ?? '·'));
+  } else {
+    const hidden = el('div', 'hand hidden', game.opponentHasThrown ? '✊' : '·');
+    hidden.title = game.opponentHasThrown ? 'They have thrown — hidden until you do' : 'They have not thrown yet';
+    box.append(hidden);
+  }
+  return box;
+}
+
+function rpsStatus(game, name, done) {
+  if (done) {
+    const result = game.result ?? {};
+    const won = result.winner === game.you.id;
+    const line = result.state === 'resigned'
+      ? (result.by === state.me.id ? 'You gave it up.' : `@${name} gave it up — you win.`)
+      : `${won ? 'You win' : 'You lose'} ${game.yourScore}–${game.opponentScore}.`;
+    return el('div', 'rps-status over', line);
+  }
+  if (game.waitingForYou) {
+    return el('div', 'rps-status waiting',
+      game.opponentHasThrown ? `@${name} has thrown. Your turn — they cannot see it either.` : 'Pick one.');
+  }
+  return el('div', 'rps-status', `You threw ${HAND[game.yourThrow]}. Waiting for @${name}.`);
+}
+
+function rpsRounds(game) {
+  const box = el('div', 'rps-rounds');
+  game.rounds.forEach((round, index) => {
+    const row = el('div', `round ${round.outcome}`);
+    row.append(el('span', 'no', `R${index + 1}`));
+    row.append(el('span', 'hands', `${HAND[round.yours]} vs ${HAND[round.theirs]}`));
+    row.append(el('span', 'outcome', { win: 'won', loss: 'lost', tie: 'tie' }[round.outcome]));
+    box.append(row);
+  });
+  return box;
+}
+
+async function throwHand(choice) {
+  try {
+    state.rps = (await api('POST', `/api/games/${state.rps.id}/throw`, { choice })).game;
+  } catch (err) {
+    flashRps(err.message);
+  }
+  renderRps();
+}
+
+async function startRpsMatch() {
+  try {
+    state.rps = (await api('POST', '/api/games', { opponentId: state.current.id, kind: 'rps' })).game;
+    renderRps();
+  } catch (err) {
+    flashRps(err.message);
+  }
+}
+
+function flashRps(message) {
+  const note = el('div', 'rps-status', message);
+  note.style.borderColor = 'var(--red)';
+  $('rps-body').prepend(note);
   setTimeout(() => note.remove(), 3500);
 }
 

@@ -487,3 +487,78 @@ dialog menu button:not(.primary) {
 .item .turn-dot {
   flex: none; font-size: 11px; color: var(--accent);
 }
+
+/* ────────────────────  rock, paper, scissors  ───────────────────────── */
+.rps { display: flex; flex-direction: column; gap: 16px; }
+
+.rps-score {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  padding: 12px; border-radius: 10px; background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+.rps-score .side { text-align: center; min-width: 82px; }
+.rps-score .name { font-size: 12px; color: var(--dim); }
+.rps-score .wins { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rps-score .side.leading .wins { color: var(--accent); }
+.rps-score .dash { color: var(--dimmer); }
+.rps-score .target { font-size: 11px; color: var(--dimmer); }
+
+.rps-throws { display: flex; gap: 10px; }
+.rps-throws button {
+  flex: 1; aspect-ratio: 1; font-size: 34px; line-height: 1;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 12px; cursor: pointer; color: var(--text);
+  display: grid; place-items: center;
+}
+.rps-throws button:hover { border-color: var(--accent); background: var(--panel-3); }
+.rps-throws button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.rps-reveal {
+  display: flex; align-items: center; justify-content: center; gap: 18px;
+  padding: 16px; border-radius: 12px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.rps-reveal .hand { font-size: 40px; line-height: 1; }
+.rps-reveal .hand.hidden { opacity: .3; }
+.rps-reveal .vs { color: var(--dimmer); font-size: 12px; }
+
+.rps-status {
+  font-size: 14px; color: var(--text);
+  padding: 9px 12px; border-radius: 8px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.rps-status.waiting { border-color: var(--accent); }
+.rps-status.over { border-color: var(--dimmer); color: var(--dim); }
+
+.rps-rounds { display: flex; flex-direction: column; gap: 4px; }
+.rps-rounds .round {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; color: var(--dim);
+  padding: 5px 10px; border-radius: 7px; background: var(--panel-2);
+}
+.rps-rounds .round .no { color: var(--dimmer); font-family: var(--mono); font-size: 11px; }
+.rps-rounds .round .hands { flex: 1; font-size: 17px; }
+.rps-rounds .round .outcome { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.rps-rounds .round.win .outcome { color: var(--green); }
+.rps-rounds .round.loss .outcome { color: var(--red); }
+.rps-rounds .round.tie .outcome { color: var(--dimmer); }
+
+/* ──────────────────────────────  dice  ──────────────────────────────── */
+.roll {
+  display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 12px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.roll .dice { display: flex; gap: 6px; align-items: center; }
+.roll .die {
+  font-size: 26px; line-height: 1; color: var(--text);
+}
+.roll .face {
+  min-width: 26px; height: 26px; padding: 0 6px;
+  display: grid; place-items: center;
+  background: var(--panel-3); border: 1px solid var(--line); border-radius: 6px;
+  font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--text);
+}
+.roll .total { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+.roll .total b { color: var(--text); font-size: 15px; }
+.roll .notation { font-family: var(--mono); font-size: 11px; color: var(--dimmer); }

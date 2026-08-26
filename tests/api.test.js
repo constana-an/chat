@@ -770,3 +770,221 @@ test('the sidebar learns whose move it is', async () => {
     assert.equal((await threadFor(black, whiteName)).game.yourTurn, true);
   });
 });
+
+// ─────────────────────────────────  rock, paper, scissors  ──────────────
+
+async function rpsGame(signIn) {
+  const ada = await signIn('ada');
+  const grace = await signIn('grace');
+  const created = await ada.call('POST', '/api/games', { opponentId: grace.user.id, kind: 'rps' });
+  assert.equal(created.status, 200, created.error);
+  return { ada, grace, gameId: created.game.id, game: created.game };
+}
+
+const throwIt = (client, gameId, choice) =>
+  client.call('POST', `/api/games/${gameId}/throw`, { choice });
+
+test('rock-paper-scissors starts straight away, no accepting needed', async () => {
+  await withServer(async ({ signIn }) => {
+    const { grace, gameId, game } = await rpsGame(signIn);
+    assert.equal(game.kind, 'rps');
+    assert.equal(game.status, 'active');
+    assert.equal(game.target, 2, 'best of three');
+    assert.equal(game.yourScore, 0);
+    assert.equal(game.waitingForYou, true);
+
+    const theirs = await grace.call('GET', `/api/games/${gameId}`);
+    assert.equal(theirs.game.waitingForYou, true, 'both sides may throw at once');
+    assert.equal(theirs.game.opponent.name, 'ada');
+  });
+});
+
+test('an opponent\'s pending throw never leaves the server', async () => {
+  for (const secret of ['rock', 'paper', 'scissors']) {
+    await withServer(async ({ signIn, openStream }) => {
+      const { ada, grace, gameId } = await rpsGame(signIn);
+      const spy = await openStream(grace.token);
+      await waitFor(spy, 'hello');
+
+      await throwIt(ada, gameId, secret);
+
+      // Fetching the game tells grace only *that* ada has thrown.
+      const view = await grace.call('GET', `/api/games/${gameId}`);
+      assert.equal(view.game.opponentHasThrown, true);
+      assert.equal(view.game.yourThrow, null);
+      assert.doesNotMatch(JSON.stringify(view), new RegExp(secret),
+        `the API leaked "${secret}" before grace threw`);
+
+      // Neither does the push she gets over the event stream.
+      const pushed = await waitFor(spy, 'game');
+      assert.doesNotMatch(JSON.stringify(pushed), new RegExp(secret),
+        `the event stream leaked "${secret}"`);
+
+      // ada, of course, can still see her own hand.
+      const mine = await ada.call('GET', `/api/games/${gameId}`);
+      assert.equal(mine.game.yourThrow, secret);
+      spy.close();
+    });
+  }
+});
+
+test('once both have thrown the round resolves and is public', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, gameId } = await rpsGame(signIn);
+
+    await throwIt(ada, gameId, 'rock');
+    const resolved = await throwIt(grace, gameId, 'scissors');
+
+    assert.equal(resolved.game.rounds.length, 1);
+    assert.deepEqual(resolved.game.rounds[0], { yours: 'scissors', theirs: 'rock', outcome: 'loss' });
+    assert.equal(resolved.game.yourScore, 0);
+    assert.equal(resolved.game.opponentScore, 1);
+
+    // The same round from the other side, mirrored.
+    const adaSide = (await ada.call('GET', `/api/games/${gameId}`)).game;
+    assert.deepEqual(adaSide.rounds[0], { yours: 'rock', theirs: 'scissors', outcome: 'win' });
+    assert.equal(adaSide.yourScore, 1);
+
+    // The board is wiped for the next round.
+    assert.equal(adaSide.yourThrow, null);
+    assert.equal(adaSide.waitingForYou, true);
+  });
+});
+
+test('a tie scores for nobody and the round is replayed', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, gameId } = await rpsGame(signIn);
+
+    await throwIt(ada, gameId, 'paper');
+    const tied = await throwIt(grace, gameId, 'paper');
+
+    assert.equal(tied.game.rounds[0].outcome, 'tie');
+    assert.equal(tied.game.yourScore, 0);
+    assert.equal(tied.game.opponentScore, 0);
+    assert.equal(tied.game.status, 'active');
+    assert.equal(tied.game.waitingForYou, true, 'go again');
+  });
+});
+
+test('you cannot throw twice in one round', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, gameId } = await rpsGame(signIn);
+    assert.equal((await throwIt(ada, gameId, 'rock')).status, 200);
+
+    const again = await throwIt(ada, gameId, 'paper');
+    assert.equal(again.status, 409, 'no changing your mind after seeing nothing');
+
+    assert.equal((await throwIt(ada, gameId, 'lizard')).status, 400, 'and no inventing throws');
+  });
+});
+
+test('first to two takes the match', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, gameId } = await rpsGame(signIn);
+
+    await throwIt(ada, gameId, 'rock');
+    await throwIt(grace, gameId, 'scissors');       // ada 1–0
+    await throwIt(ada, gameId, 'paper');
+    const done = await throwIt(grace, gameId, 'rock'); // ada 2–0
+
+    assert.equal(done.game.status, 'finished');
+    assert.equal(done.game.result.state, 'won');
+    assert.equal(done.game.yourScore, 0);
+    assert.equal(done.game.opponentScore, 2);
+    assert.equal((await throwIt(ada, gameId, 'rock')).status, 409, 'the match is closed');
+
+    const told = (await grace.call('GET', '/api/notifications')).notifications;
+    assert.ok(told.some((n) => /You lose 0–2/.test(n.preview)), 'the loser is told the score');
+    assert.ok(told.every((n) => !n.preview.startsWith('♟')), 'a hand of RPS is not labelled with a chess piece');
+  });
+});
+
+test('a chess game and a hand of rock-paper-scissors can run side by side', async () => {
+  await withServer(async ({ signIn }) => {
+    const ada = await signIn('ada');
+    const grace = await signIn('grace');
+
+    const chess = await ada.call('POST', '/api/games', { opponentId: grace.user.id });
+    const rps = await ada.call('POST', '/api/games', { opponentId: grace.user.id, kind: 'rps' });
+    assert.equal(chess.status, 200);
+    assert.equal(rps.status, 200);
+    assert.notEqual(chess.game.id, rps.game.id);
+
+    // But still only one of each.
+    assert.equal((await ada.call('POST', '/api/games', { opponentId: grace.user.id, kind: 'rps' })).status, 409);
+
+    const thread = (await ada.call('GET', '/api/state')).dms.find((t) => t.username === 'grace');
+    assert.equal(thread.game.id, chess.game.id, 'the sidebar tracks the chess game');
+    assert.equal(thread.rps.id, rps.game.id, 'and the hand of RPS separately');
+    assert.equal(thread.rps.waitingForYou, true);
+
+    // Throwing at a chess game, or moving in a hand of RPS, is refused.
+    assert.equal((await throwIt(ada, chess.game.id, 'rock')).status, 400);
+  });
+});
+
+// ────────────────────────────────────────────────  dice  ────────────────
+
+test('/roll posts a roll, not a line of text', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+
+    const rolled = await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: '/roll 3d6' });
+    assert.equal(rolled.status, 200);
+
+    const message = rolled.message;
+    assert.equal(message.kind, 'roll');
+    assert.equal(message.roll.notation, '3d6');
+    assert.equal(message.roll.values.length, 3);
+    assert.ok(message.roll.values.every((v) => v >= 1 && v <= 6), message.roll.values.join());
+    assert.equal(message.roll.total, message.roll.values.reduce((a, b) => a + b, 0));
+    assert.match(message.text, /^🎲 3d6:/, 'it still reads as text for anything that cannot draw dice');
+
+    // Everyone in the channel gets it through the ordinary history and unread paths.
+    const seen = (await grace.call('GET', `/api/channels/${channel.id}/messages`)).messages.at(-1);
+    assert.equal(seen.kind, 'roll');
+    assert.deepEqual(seen.roll.values, message.roll.values);
+    assert.equal((await channelOf(grace, channel.id)).unread, 1, 'a roll counts as unread like any message');
+  });
+});
+
+test('a roll is channel activity — it notifies nobody', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: '/roll' });
+    assert.equal((await grace.call('GET', '/api/notifications')).notifications.length, 0);
+  });
+});
+
+test('a bad roll is refused with a reason and posts nothing', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, channel } = await twoUsersInAChannel(signIn);
+
+    const tooMany = await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: '/roll 99d6' });
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.error, /between 1 and 10 dice/);
+
+    const nonsense = await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: '/roll banana' });
+    assert.equal(nonsense.status, 400);
+    assert.match(nonsense.error, /\/roll d20/);
+
+    assert.equal((await ada.call('GET', `/api/channels/${channel.id}/messages`)).messages.length, 0,
+      'nothing was posted');
+  });
+});
+
+test('a roll works in a direct message too, and does not eat ordinary text', async () => {
+  await withServer(async ({ signIn }) => {
+    const ada = await signIn('ada');
+    const grace = await signIn('grace');
+
+    const rolled = await ada.call('POST', `/api/dms/${grace.user.id}/messages`, { text: '/roll d20' });
+    assert.equal(rolled.message.kind, 'roll');
+    assert.ok(rolled.message.roll.total >= 1 && rolled.message.roll.total <= 20);
+
+    const plain = await ada.call('POST', `/api/dms/${grace.user.id}/messages`, { text: 'we should /roll for it' });
+    assert.equal(plain.message.kind, 'text');
+    assert.equal(plain.message.roll, null);
+    assert.equal(plain.message.text, 'we should /roll for it');
+  });
+});

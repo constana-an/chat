@@ -18,6 +18,7 @@ import {
   sanitizeQuietHours,
 } from './notifications.js';
 import { initialPosition, repetitionKey, toFen } from './chess.js';
+import { describeRoll, looksLikeRoll, parseRollCommand, rollDice } from './games.js';
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -356,7 +357,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
 
   // ------------------------------------------------------------------ messages
 
-  function appendMessage(conversation, { authorId, text, mentions }) {
+  function appendMessage(conversation, { authorId, text, mentions, kind = 'text', roll = null }) {
     const message = {
       id: id('m'),
       seq: ++state.seq,
@@ -365,6 +366,8 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       authorId,
       authorName: getUser(authorId)?.name ?? 'unknown',
       text,
+      kind,
+      roll,
       mentions,
       ts: Date.now(),
     };
@@ -378,25 +381,53 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     return message;
   }
 
+  /**
+   * A `/roll` becomes a dice message rather than text. Doing it here, beside
+   * mention parsing, means rolls ride the whole existing pipeline for free:
+   * history, unread counts, the event stream and persistence.
+   */
+  function buildMessage(text) {
+    const body = cleanText(text);
+    if (!looksLikeRoll(body)) {
+      return { text: body, kind: 'text', roll: null, mentioned: parseMentions(body, (n) => getUserByName(n)) };
+    }
+    let spec;
+    try {
+      spec = parseRollCommand(body);
+    } catch (err) {
+      throw httpError(400, err.message);
+    }
+    if (!spec) throw httpError(400, 'Try /roll, /roll d20 or /roll 3d6.');
+    const roll = rollDice(spec.dice, spec.sides);
+    // A roll names nobody, so it never becomes a mention.
+    return { text: describeRoll(roll), kind: 'roll', roll, mentioned: [] };
+  }
+
   function postChannelMessage({ channelId, authorId, text }) {
     const channel = mustChannel(channelId);
-    const body = cleanText(text);
     if (!channel.members.has(authorId)) throw httpError(403, `Join #${channel.name} before posting.`);
-    const conversation = state.conversations.get(channelId);
-    return appendMessage(conversation, {
+    const built = buildMessage(text);
+    return appendMessage(state.conversations.get(channelId), {
       authorId,
-      text: body,
-      mentions: parseMentions(body, (name) => getUserByName(name)),
+      text: built.text,
+      kind: built.kind,
+      roll: built.roll,
+      mentions: built.mentioned,
     });
   }
 
   function postDirectMessage({ fromId, toId, text }) {
     mustUser(fromId);
     mustUser(toId);
-    const body = cleanText(text);
-    const conversation = ensureDmConversation(fromId, toId);
-    // Everyone in a DM is implicitly "mentioned" — that is what a DM is.
-    return appendMessage(conversation, { authorId: fromId, text: body, mentions: [toId] });
+    const built = buildMessage(text);
+    return appendMessage(ensureDmConversation(fromId, toId), {
+      authorId: fromId,
+      text: built.text,
+      kind: built.kind,
+      roll: built.roll,
+      // Everyone in a DM is implicitly "mentioned" — that is what a DM is.
+      mentions: [toId],
+    });
   }
 
   function history(conversationId, { before = null, limit = 60 } = {}) {
@@ -504,6 +535,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     const start = initialPosition();
     const game = {
       id: id('g'),
+      kind: 'chess',
       conversationId,
       white: whiteId,
       black: blackId,
@@ -523,6 +555,32 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     return game;
   }
 
+  /**
+   * Rock-paper-scissors, best of three by default. `throws` holds the current
+   * round only, and the route layer must redact an opponent's pending throw --
+   * a visible choice is not a game.
+   */
+  function createRpsGame({ conversationId, players, createdBy, target = 2 }) {
+    const game = {
+      id: id('g'),
+      kind: 'rps',
+      conversationId,
+      players: [...players],
+      createdBy,
+      target,
+      scores: Object.fromEntries(players.map((playerId) => [playerId, 0])),
+      throws: {},
+      rounds: [],
+      status: 'active',
+      result: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    state.games.set(game.id, game);
+    save();
+    return game;
+  }
+
   const getGame = (gameId) => state.games.get(gameId);
 
   /** Newest first; a thread usually has one live game and a pile of old ones. */
@@ -531,8 +589,9 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       .filter((game) => game.conversationId === conversationId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
 
-  const activeGameIn = (conversationId) =>
-    listGamesIn(conversationId).find((game) => game.status !== 'finished') ?? null;
+  const activeGameIn = (conversationId, kind = 'chess') =>
+    listGamesIn(conversationId).find((game) => (game.kind ?? 'chess') === kind && game.status !== 'finished')
+    ?? null;
 
   function saveGame(game) {
     game.updatedAt = Date.now();
@@ -591,7 +650,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     unreadFor, markRead,
     setChannelMute, setQuietHours,
     addNotification, listNotifications, markNotificationsRead, replaceGameNotification,
-    createGame, getGame, listGamesIn, activeGameIn, saveGame,
+    createGame, createRpsGame, getGame, listGamesIn, activeGameIn, saveGame,
     setOnline, isOnline,
     newId: id,
     save,
@@ -604,6 +663,8 @@ export function publicMessage(message) {
     seq: message.seq,
     conversationId: message.conversationId,
     scope: message.scope,
+    kind: message.kind ?? 'text',
+    roll: message.roll ?? null,
     authorId: message.authorId,
     authorName: message.authorName,
     text: message.text,
