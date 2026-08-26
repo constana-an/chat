@@ -8,6 +8,20 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap">
 
+<script>
+  // 先于正文解析，避免切换语言时闪一下另一种语言
+  (function () {
+    var lang = 'zh';
+    try {
+      var saved = localStorage.getItem('teamchat.manual.lang');
+      if (saved === 'zh' || saved === 'en') lang = saved;
+      else if (!(navigator.language || '').toLowerCase().startsWith('zh')) lang = 'en';
+    } catch (e) { /* 隐私模式下读不到，用默认值 */ }
+    document.documentElement.setAttribute('data-lang', lang);
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+  })();
+</script>
+
 <style>
   :root {
     --ground: #f7f6fa;
@@ -27,7 +41,6 @@
 
     /* 下面这组是 app 里真实的颜色，图例要照实还原，因此两种主题下都固定 */
     --app-bg: #151824;
-    --app-bg-2: #1b1f2d;
     --app-line: #2a3044;
     --app-text: #e6e8f0;
     --app-dim: #8a90a6;
@@ -75,6 +88,10 @@
     --warn-line: #5c4a1a;
   }
 
+  /* ── 语言切换：没有 data-lang 时默认只显示中文，JS 不可用也能读 ── */
+  :root:not([data-lang="en"]) [lang="en"] { display: none !important; }
+  :root[data-lang="en"] [lang="zh"] { display: none !important; }
+
   * { box-sizing: border-box; }
 
   body {
@@ -86,11 +103,12 @@
     line-height: 1.85;
     -webkit-font-smoothing: antialiased;
   }
+  :root[data-lang="en"] body { line-height: 1.7; }
 
   .page {
     max-width: 780px;
     margin: 0 auto;
-    padding: 56px 24px 96px;
+    padding: 40px 24px 96px;
     display: flex;
     flex-direction: column;
     gap: 52px;
@@ -109,6 +127,37 @@
   }
 
   b { font-weight: 700; color: var(--ink); }
+
+  /* ── 语言开关 ─────────────────────────────────────────── */
+  .topbar { display: flex; justify-content: flex-end; }
+
+  .lang-switch {
+    display: inline-flex;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .lang-switch button {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    padding: 5px 15px;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1.6;
+  }
+  .lang-switch button:hover { color: var(--ink); }
+  .lang-switch button[aria-pressed="true"] {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: 0 1px 2px #00000014;
+  }
+  .lang-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* ── 页头 ─────────────────────────────────────────────── */
   header { display: flex; flex-direction: column; gap: 12px; }
@@ -137,6 +186,8 @@
 
   /* ── 区块 ─────────────────────────────────────────────── */
   section { display: flex; flex-direction: column; gap: 20px; }
+
+  .sec-head { display: flex; flex-direction: column; gap: 8px; }
 
   h2 {
     font-family: "IBM Plex Serif", "Noto Serif SC", Georgia, serif;
@@ -226,25 +277,15 @@
   .card p { font-size: 15px; }
 
   /* ── app 界面还原（固定深色，因为 app 本身只有深色）──── */
-  .mock {
-    background: var(--app-bg);
-    border: 1px solid var(--app-line);
-    border-radius: 8px;
-    padding: 10px 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
-  }
-
   .mock-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border-radius: 7px;
     font-size: 14px;
     color: var(--app-dim);
+    font-family: "IBM Plex Sans", sans-serif;
   }
   .mock-row.is-unread { color: var(--app-text); font-weight: 600; }
 
@@ -289,7 +330,6 @@
     border-radius: 7px;
     padding: 3px 5px;
   }
-  .legend-sample .mock-row { padding: 6px 8px; }
 
   .legend-text { font-size: 15px; color: var(--ink-2); }
 
@@ -366,7 +406,7 @@
     align-items: baseline;
   }
   .key-row:last-child { border-bottom: 1px solid var(--line); }
-  .key-row span:last-child { color: var(--ink-2); font-size: 15px; }
+  .key-row .desc { color: var(--ink-2); font-size: 15px; }
 
   /* ── 问答 ─────────────────────────────────────────────── */
   .qa { display: flex; flex-direction: column; gap: 0; }
@@ -390,36 +430,56 @@
 <body>
 <div class="page">
 
+  <div class="topbar">
+    <div class="lang-switch" role="group" aria-label="Language / 语言">
+      <button type="button" data-lang="zh" aria-pressed="true">中文</button>
+      <button type="button" data-lang="en" aria-pressed="false">English</button>
+    </div>
+  </div>
+
   <header>
     <div class="eyebrow">Team Chat</div>
-    <h1>使用手册</h1>
-    <p class="standfirst">
+    <h1 lang="zh">使用手册</h1>
+    <h1 lang="en">User Guide</h1>
+    <p class="standfirst" lang="zh">
       一个自己搭的小聊天室：频道、私信、@提及、静音和免打扰。
       这份手册讲清楚怎么用，以及界面上那些数字和颜色分别代表什么。
+    </p>
+    <p class="standfirst" lang="en">
+      A small self-hosted chat room: channels, direct messages, @mentions, mutes and quiet
+      hours. This guide covers how to use it — and what all those numbers and colours in
+      the sidebar actually mean.
     </p>
   </header>
 
   <hr class="rule">
 
   <section>
-    <h2>第一次进来</h2>
+    <h2 lang="zh">第一次进来</h2>
+    <h2 lang="en">Getting in the first time</h2>
 
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
         <div class="step-body">
-          <h3>装 Tailscale，加入邀请你的那个网络</h3>
-          <p>
+          <h3 lang="zh">装 Tailscale，加入邀请你的那个网络</h3>
+          <h3 lang="en">Install Tailscale and join the network you were invited to</h3>
+          <p lang="zh">
             这个聊天室没有挂在公网上，只有加入同一个 Tailscale 网络的人才能访问。
             装好之后保持它是「已连接」状态就行，平时不用管。
+          </p>
+          <p lang="en">
+            This chat room is not on the public internet — only people on the same Tailscale
+            network can reach it. Install it, leave it connected, and then forget about it.
           </p>
 
           <div class="install">
             <a class="btn" href="https://tailscale.com/download"
                target="_blank" rel="noopener noreferrer">
-              下载 Tailscale <span aria-hidden="true">↗</span>
+              <span lang="zh">下载 Tailscale</span><span lang="en">Download Tailscale</span>
+              <span aria-hidden="true">↗</span>
             </a>
-            <p class="install-note">
+            <p class="install-note" lang="zh">
               打开后会自动认出你的系统。也可以直接挑：<a href="https://tailscale.com/download/mac"
               target="_blank" rel="noopener noreferrer">macOS</a> · <a
               href="https://tailscale.com/download/windows" target="_blank"
@@ -429,6 +489,17 @@
               rel="noopener noreferrer">Android</a> · <a href="https://tailscale.com/download/linux"
               target="_blank" rel="noopener noreferrer">Linux</a>。装完不用自己建网络，等对方发邀请给你就行。
             </p>
+            <p class="install-note" lang="en">
+              The page detects your system automatically. Or pick one directly: <a
+              href="https://tailscale.com/download/mac" target="_blank" rel="noopener noreferrer">macOS</a>
+              · <a href="https://tailscale.com/download/windows" target="_blank"
+              rel="noopener noreferrer">Windows</a> · <a href="https://tailscale.com/download/ios"
+              target="_blank" rel="noopener noreferrer">iOS</a> · <a
+              href="https://tailscale.com/download/android" target="_blank"
+              rel="noopener noreferrer">Android</a> · <a href="https://tailscale.com/download/linux"
+              target="_blank" rel="noopener noreferrer">Linux</a>. You don't need to create a network
+              yourself — just wait for the invitation.
+            </p>
           </div>
         </div>
       </div>
@@ -436,10 +507,16 @@
       <div class="step">
         <div class="step-num">2</div>
         <div class="step-body">
-          <h3>打开对方给你的地址</h3>
-          <p>
+          <h3 lang="zh">打开对方给你的地址</h3>
+          <h3 lang="en">Open the address you were given</h3>
+          <p lang="zh">
             通常长得像 <kbd>http://某台电脑:3000</kbd>。打不开的话，先确认 Tailscale
             连着，再确认对方的电脑开着、没睡眠 —— 聊天室是跑在他那台机器上的。
+          </p>
+          <p lang="en">
+            Usually something like <kbd>http://some-computer:3000</kbd>. If it won't open, check
+            that Tailscale is connected, then check that the host's computer is awake — the chat
+            room runs on their machine.
           </p>
         </div>
       </div>
@@ -447,15 +524,26 @@
       <div class="step">
         <div class="step-num">3</div>
         <div class="step-body">
-          <h3>取一个用户名，设一个密码</h3>
-          <p>
+          <h3 lang="zh">取一个用户名，设一个密码</h3>
+          <h3 lang="en">Pick a username and a password</h3>
+          <p lang="zh">
             <b>第一次输入某个用户名，就等于注册了它</b>，你当时填的密码就是这个账号的密码。
             之后再用同一个名字进来，就要输对密码。用户名 2–32 个字符，只能用字母、数字和
             <kbd>.</kbd> <kbd>-</kbd> <kbd>_</kbd>；密码至少 8 位。
           </p>
-          <p>
+          <p lang="en">
+            <b>The first time you enter a username, you are registering it</b>, and whatever
+            password you type becomes that account's password. After that, the same name needs
+            the same password. Usernames are 2–32 characters — letters, numbers, and
+            <kbd>.</kbd> <kbd>-</kbd> <kbd>_</kbd>; passwords are at least 8 characters.
+          </p>
+          <p lang="zh">
             登录成功时如果提示「Account created」，说明你创建了一个<b>新</b>账号 ——
             要是你本来想登录旧账号，多半是名字打错了一个字母。
+          </p>
+          <p lang="en">
+            If it says <b>Account created</b> when you meant to sign back in, you have just made
+            a <b>new</b> account — you probably mistyped a letter in the name.
           </p>
         </div>
       </div>
@@ -463,20 +551,30 @@
       <div class="step">
         <div class="step-num">4</div>
         <div class="step-body">
-          <h3>记牢密码</h3>
-          <p>
+          <h3 lang="zh">记牢密码</h3>
+          <h3 lang="en">Remember the password</h3>
+          <p lang="zh">
             没有邮箱验证，也<b>没有「忘记密码」功能</b>。忘了就只能找搭服务器的那个人手动处理。
             建议直接存进密码管理器。
+          </p>
+          <p lang="en">
+            There is no email verification and <b>no "forgot password"</b>. If you lose it, the
+            person running the server has to fix it by hand. Put it in a password manager.
           </p>
         </div>
       </div>
     </div>
 
     <div class="callout">
-      <h3>登录状态是「按标签页」保存的</h3>
-      <p>
+      <h3 lang="zh">登录状态是「按标签页」保存的</h3>
+      <h3 lang="en">Sign-in is remembered per browser tab</h3>
+      <p lang="zh">
         关掉标签页就要重新登录，这是故意的 —— 好处是你可以开两个标签页，用两个不同的身份，
         自己跟自己对话来试功能。另外服务器一重启，所有人都要重新登录一次。
+      </p>
+      <p lang="en">
+        Close the tab and you sign in again. That is deliberate: it lets you open two tabs as
+        two different people to try things out. Restarting the server also signs everyone out.
       </p>
     </div>
   </section>
@@ -484,40 +582,63 @@
   <hr class="rule">
 
   <section>
-    <h2>日常操作</h2>
+    <h2 lang="zh">日常操作</h2>
+    <h2 lang="en">Everyday use</h2>
 
     <div class="cards">
       <div class="card">
-        <h3>发消息</h3>
-        <p>
+        <h3 lang="zh">发消息</h3>
+        <h3 lang="en">Sending a message</h3>
+        <p lang="zh">
           在底部输入框打字，<kbd>Enter</kbd> 发送，<kbd>Shift</kbd> + <kbd>Enter</kbd> 换行。
           单条最长 4000 字。
+        </p>
+        <p lang="en">
+          Type in the box at the bottom. <kbd>Enter</kbd> sends, <kbd>Shift</kbd> +
+          <kbd>Enter</kbd> starts a new line. 4000 characters per message.
         </p>
       </div>
 
       <div class="card">
-        <h3>@ 某个人</h3>
-        <p>
+        <h3 lang="zh">@ 某个人</h3>
+        <h3 lang="en">Mentioning someone</h3>
+        <p lang="zh">
           输入 <kbd>@</kbd> 会弹出候选名单，<kbd>↑</kbd> <kbd>↓</kbd> 选，
           <kbd>Enter</kbd> 或 <kbd>Tab</kbd> 确认，<kbd>Esc</kbd> 关掉。
           被 @ 的人一定会收到通知。
         </p>
-      </div>
-
-      <div class="card">
-        <h3>发私信</h3>
-        <p>
-          点左栏「DIRECT MESSAGES」里的名字就开始私聊。名字前的绿点表示对方在线。
-          私信永远会通知对方。
+        <p lang="en">
+          Type <kbd>@</kbd> and a list appears. <kbd>↑</kbd> <kbd>↓</kbd> to choose,
+          <kbd>Enter</kbd> or <kbd>Tab</kbd> to confirm, <kbd>Esc</kbd> to dismiss.
+          Whoever you name always gets a notification.
         </p>
       </div>
 
       <div class="card">
-        <h3>频道</h3>
-        <p>
+        <h3 lang="zh">发私信</h3>
+        <h3 lang="en">Direct messages</h3>
+        <p lang="zh">
+          点左栏「DIRECT MESSAGES」里的名字就开始私聊。名字前的绿点表示对方在线。
+          私信永远会通知对方。
+        </p>
+        <p lang="en">
+          Click a name under <b>DIRECT MESSAGES</b> to start one. A green dot means they are
+          online. A DM always notifies the other person.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3 lang="zh">频道</h3>
+        <h3 lang="en">Channels</h3>
+        <p lang="zh">
           「CHANNELS」是你已加入的，「BROWSE」是还没加入的 —— 点一下就进去了。
           右上角 <b>Leave</b> 退出，标题旁的 <b>+</b> 新建频道。
           手机上先点左上角的 <b>☰</b> 打开这个列表。
+        </p>
+        <p lang="en">
+          <b>CHANNELS</b> are the ones you have joined; <b>BROWSE</b> are the ones you have not —
+          click to join. <b>Leave</b> is top right, and <b>+</b> next to the heading creates one.
+          On a phone, tap <b>☰</b> at the top left to open the list.
         </p>
       </div>
     </div>
@@ -526,8 +647,12 @@
   <hr class="rule">
 
   <section>
-    <h2>看懂左边栏的数字和颜色</h2>
-    <p>这是最容易看糊涂的地方。下面左侧是它在界面上真实的样子。</p>
+    <div class="sec-head">
+      <h2 lang="zh">看懂左边栏的数字和颜色</h2>
+      <h2 lang="en">Reading the numbers and colours</h2>
+      <p lang="zh">这是最容易看糊涂的地方。下面左侧是它在界面上真实的样子。</p>
+      <p lang="en">This is the part that confuses people. On the left is exactly how it looks in the app.</p>
+    </div>
 
     <div class="legend">
       <div class="legend-row">
@@ -539,7 +664,9 @@
           </div>
         </div>
         <div class="legend-text">
-          <b>紫色数字</b> —— 有 2 条消息 @ 了你。这个最优先，看到紫色先点进去。
+          <span lang="zh"><b>紫色数字</b> —— 有 2 条消息 @ 了你。这个最优先，看到紫色先点进去。</span>
+          <span lang="en"><b>Purple number</b> — 2 messages mentioned you. This one takes priority;
+            when you see purple, look there first.</span>
         </div>
       </div>
 
@@ -552,7 +679,8 @@
           </div>
         </div>
         <div class="legend-text">
-          <b>红色数字</b> —— 7 条没读的普通消息，没人点你的名。
+          <span lang="zh"><b>红色数字</b> —— 7 条没读的普通消息，没人点你的名。</span>
+          <span lang="en"><b>Red number</b> — 7 unread messages, nobody named you.</span>
         </div>
       </div>
 
@@ -566,7 +694,9 @@
           </div>
         </div>
         <div class="legend-text">
-          <b>灰色数字 + 🔕</b> —— 这个频道被你静音了。消息照样帮你数着，但不会弹出来打扰你。
+          <span lang="zh"><b>灰色数字 + 🔕</b> —— 这个频道被你静音了。消息照样帮你数着，但不会弹出来打扰你。</span>
+          <span lang="en"><b>Grey number + 🔕</b> — you muted this channel. It still counts for you,
+            it just will not interrupt you.</span>
         </div>
       </div>
 
@@ -579,7 +709,9 @@
           </div>
         </div>
         <div class="legend-text">
-          <b>绿点</b> 表示这个人现在在线；后面的数字是她发给你、你还没看的私信。
+          <span lang="zh"><b>绿点</b> 表示这个人现在在线；后面的数字是她发给你、你还没看的私信。</span>
+          <span lang="en">A <b>green dot</b> means that person is online; the number is unread
+            direct messages from them.</span>
         </div>
       </div>
 
@@ -591,86 +723,135 @@
           </div>
         </div>
         <div class="legend-text">
-          <b>没有数字、字是灰的</b> —— 全都读过了，没有新消息。
+          <span lang="zh"><b>没有数字、字是灰的</b> —— 全都读过了，没有新消息。</span>
+          <span lang="en"><b>No number, grey text</b> — everything is read.</span>
         </div>
       </div>
     </div>
 
-    <h3 style="margin-top:14px">消息区里的两个记号</h3>
+    <h3 lang="zh" style="margin-top:14px">消息区里的两个记号</h3>
+    <h3 lang="en" style="margin-top:14px">Two marks in the message list</h3>
 
     <div class="msg-sample">
-      <div class="msg-line">今天的部署都正常</div>
-      <div class="msg-line">发布说明放在共享文档里了</div>
+      <div class="msg-line"><span lang="zh">今天的部署都正常</span><span lang="en">Today's deploy is green</span></div>
+      <div class="msg-line"><span lang="zh">发布说明放在共享文档里了</span><span lang="en">Release notes are in the shared doc</span></div>
       <div class="msg-new">NEW</div>
-      <div class="msg-line mine"><span class="msg-at you">@你</span> 能帮忙看一下那个测试吗？</div>
+      <div class="msg-line mine">
+        <span class="msg-at you" lang="zh">@你</span><span class="msg-at you" lang="en">@you</span>
+        <span lang="zh"> 能帮忙看一下那个测试吗？</span><span lang="en"> could you take a look at that test?</span>
+      </div>
     </div>
 
-    <p>
+    <p lang="zh">
       红色的 <b>NEW</b> 横线标出你上次读到哪里 —— 它下面全是新的。
       左边有<b>琥珀色竖条</b>、并且高亮出你名字的那条，是有人在 @ 你。
+    </p>
+    <p lang="en">
+      The red <b>NEW</b> line marks where you left off — everything below it is new. A message
+      with an <b>amber bar</b> down its left side, with your name highlighted, is someone
+      mentioning you.
     </p>
   </section>
 
   <hr class="rule">
 
   <section>
-    <h2>通知：铃铛里会出现什么</h2>
-    <p>
-      右上角的铃铛<b>只收两种东西：私信，和别人 @ 你</b>。
-      频道里的普通聊天不会进铃铛 —— 那些交给左边栏的未读数字就够了，
-      否则铃铛会被刷爆，反而什么都看不见。
-    </p>
+    <div class="sec-head">
+      <h2 lang="zh">通知：铃铛里会出现什么</h2>
+      <h2 lang="en">Notifications: what lands in the bell</h2>
+      <p lang="zh">
+        右上角的铃铛<b>只收两种东西：私信，和别人 @ 你</b>。
+        频道里的普通聊天不会进铃铛 —— 那些交给左边栏的未读数字就够了，
+        否则铃铛会被刷爆，反而什么都看不见。
+      </p>
+      <p lang="en">
+        The bell at the top right <b>collects only two things: direct messages, and someone
+        @-ing you</b>. Ordinary channel chatter never goes in — the unread numbers in the
+        sidebar cover that. Otherwise the bell would fill with noise and you would stop
+        looking at it.
+      </p>
+    </div>
 
     <div class="cards">
       <div class="card">
-        <h3>点一下就跳过去</h3>
-        <p>点铃铛里的任意一条，直接跳到对应的频道或私信。</p>
+        <h3 lang="zh">点一下就跳过去</h3>
+        <h3 lang="en">Click to jump straight there</h3>
+        <p lang="zh">点铃铛里的任意一条，直接跳到对应的频道或私信。</p>
+        <p lang="en">Click any entry to go straight to that channel or conversation.</p>
       </div>
       <div class="card">
-        <h3>读了就会自动清掉</h3>
-        <p>进到某个会话把消息看了，属于它的通知会自动标记为已读。也可以按「Mark all read」全部清空。</p>
+        <h3 lang="zh">读了就会自动清掉</h3>
+        <h3 lang="en">Reading clears it</h3>
+        <p lang="zh">进到某个会话把消息看了，属于它的通知会自动标记为已读。也可以按「Mark all read」全部清空。</p>
+        <p lang="en">Open a conversation and read it, and its notifications mark themselves read.
+          Or use <b>Mark all read</b> to clear the lot.</p>
       </div>
     </div>
 
-    <p>
+    <p lang="zh">
       每条通知下面都有小标签，告诉你它为什么会出现：<b>DM</b>（私信）、
       <b>MENTION</b>（被 @）、<b>BYPASSED MUTE</b>（这个频道你静音了，但因为 @ 了你所以照样送到）、
       <b>QUIET HOURS</b>（在你的免打扰时段里，所以没响，但给你留着了）。
     </p>
+    <p lang="en">
+      Each notification carries small tags explaining why it is there: <b>DM</b>,
+      <b>MENTION</b>, <b>BYPASSED MUTE</b> (you muted that channel, but it mentioned you, so it
+      came through anyway) and <b>QUIET HOURS</b> (it arrived inside your quiet hours, so it
+      stayed silent — but it was kept for you).
+    </p>
   </section>
 
   <hr class="rule">
 
   <section>
-    <h2>静音和免打扰</h2>
-    <p>
-      两个功能长得像，其实管的是不同的事。点右上角齿轮可以统一设置。
-    </p>
+    <div class="sec-head">
+      <h2 lang="zh">静音和免打扰</h2>
+      <h2 lang="en">Mutes and quiet hours</h2>
+      <p lang="zh">两个功能长得像，其实管的是不同的事。点右上角齿轮可以统一设置。</p>
+      <p lang="en">They look similar but do different jobs. The gear icon at the top right has both.</p>
+    </div>
 
     <div class="cards">
       <div class="card">
-        <h3>静音某个频道</h3>
-        <p>
+        <h3 lang="zh">静音某个频道</h3>
+        <h3 lang="en">Muting a channel</h3>
+        <p lang="zh">
           在频道右上角点 <b>Mute</b>，或到设置里勾选。
           静音之后这个频道<b>不再弹提示</b>，但<b>未读数字照样帮你数</b> ——
           静音管的是「别吵我」，不是「别让我看见」。
         </p>
+        <p lang="en">
+          Click <b>Mute</b> at the top right of a channel, or tick it in settings. A muted
+          channel <b>stops interrupting you</b> but <b>keeps counting unread</b> — muting means
+          "don't interrupt me", not "hide this from me".
+        </p>
       </div>
       <div class="card">
-        <h3>免打扰时段</h3>
-        <p>
+        <h3 lang="zh">免打扰时段</h3>
+        <h3 lang="en">Quiet hours</h3>
+        <p lang="zh">
           在设置里开启，填一个时间段（可以跨午夜，比如 22:00 到 08:00）。
           这段时间里什么都不会弹出来，但<b>通知不会丢</b>，全都留在铃铛里等你。
           还可以单独勾选「让私信穿透」。
+        </p>
+        <p lang="en">
+          Turn it on in settings and give it a window — it may cross midnight, e.g. 22:00 to
+          08:00. Nothing pops up during it, but <b>nothing is lost either</b>: it all waits in
+          the bell. You can separately let direct messages ring through.
         </p>
       </div>
     </div>
 
     <div class="callout">
-      <h3>最重要的一条：静音拦不住私信和 @ 你</h3>
-      <p>
+      <h3 lang="zh">最重要的一条：静音拦不住私信和 @ 你</h3>
+      <h3 lang="en">The one that matters: a mute never blocks a DM or an @mention</h3>
+      <p lang="zh">
         你可以放心把吵闹的频道静音。别人真有急事 @ 你，或者直接私信你，
         照样会弹出来 —— 静音只挡得住普通的频道闲聊。
+      </p>
+      <p lang="en">
+        Mute noisy channels freely. If someone genuinely needs you and @s you, or messages you
+        directly, it still comes through — a mute only stops ordinary channel chatter.
       </p>
     </div>
 
@@ -678,48 +859,48 @@
       <table>
         <thead>
           <tr>
-            <th>发生了什么</th>
-            <th>左边栏数字</th>
-            <th>进铃铛</th>
-            <th>弹出提示</th>
+            <th scope="col"><span lang="zh">发生了什么</span><span lang="en">What happened</span></th>
+            <th scope="col"><span lang="zh">左边栏数字</span><span lang="en">Sidebar number</span></th>
+            <th scope="col"><span lang="zh">进铃铛</span><span lang="en">In the bell</span></th>
+            <th scope="col"><span lang="zh">弹出提示</span><span lang="en">Pops up</span></th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td>频道里的普通消息</td>
-            <td>红色 +1</td>
-            <td class="no">不进</td>
-            <td class="no">不弹</td>
+            <td><span lang="zh">频道里的普通消息</span><span lang="en">Ordinary channel message</span></td>
+            <td><span lang="zh">红色 +1</span><span lang="en">Red +1</span></td>
+            <td class="no"><span lang="zh">不进</span><span lang="en">No</span></td>
+            <td class="no"><span lang="zh">不弹</span><span lang="en">No</span></td>
           </tr>
           <tr>
-            <td>普通消息（频道已静音）</td>
-            <td>灰色 +1</td>
-            <td class="no">不进</td>
-            <td class="no">不弹</td>
+            <td><span lang="zh">普通消息（频道已静音）</span><span lang="en">Ordinary message, channel muted</span></td>
+            <td><span lang="zh">灰色 +1</span><span lang="en">Grey +1</span></td>
+            <td class="no"><span lang="zh">不进</span><span lang="en">No</span></td>
+            <td class="no"><span lang="zh">不弹</span><span lang="en">No</span></td>
           </tr>
           <tr>
-            <td>有人 @ 你</td>
-            <td>紫色 +1</td>
-            <td class="yes">进</td>
-            <td class="yes">弹</td>
+            <td><span lang="zh">有人 @ 你</span><span lang="en">Someone @s you</span></td>
+            <td><span lang="zh">紫色 +1</span><span lang="en">Purple +1</span></td>
+            <td class="yes"><span lang="zh">进</span><span lang="en">Yes</span></td>
+            <td class="yes"><span lang="zh">弹</span><span lang="en">Yes</span></td>
           </tr>
           <tr>
-            <td>有人 @ 你（频道已静音）</td>
-            <td>紫色 +1</td>
-            <td class="yes">进</td>
-            <td class="yes">照样弹</td>
+            <td><span lang="zh">有人 @ 你（频道已静音）</span><span lang="en">Someone @s you, channel muted</span></td>
+            <td><span lang="zh">紫色 +1</span><span lang="en">Purple +1</span></td>
+            <td class="yes"><span lang="zh">进</span><span lang="en">Yes</span></td>
+            <td class="yes"><span lang="zh">照样弹</span><span lang="en">Still pops up</span></td>
           </tr>
           <tr>
-            <td>收到私信</td>
-            <td>红色 +1</td>
-            <td class="yes">进</td>
-            <td class="yes">弹</td>
+            <td><span lang="zh">收到私信</span><span lang="en">A direct message</span></td>
+            <td><span lang="zh">红色 +1</span><span lang="en">Red +1</span></td>
+            <td class="yes"><span lang="zh">进</span><span lang="en">Yes</span></td>
+            <td class="yes"><span lang="zh">弹</span><span lang="en">Yes</span></td>
           </tr>
           <tr>
-            <td>@ 你或私信（免打扰时段内）</td>
-            <td>照常 +1</td>
-            <td class="yes">进</td>
-            <td class="no">不弹，但留着</td>
+            <td><span lang="zh">@ 你或私信（免打扰时段内）</span><span lang="en">@mention or DM, during quiet hours</span></td>
+            <td><span lang="zh">照常 +1</span><span lang="en">+1 as usual</span></td>
+            <td class="yes"><span lang="zh">进</span><span lang="en">Yes</span></td>
+            <td class="no"><span lang="zh">不弹，但留着</span><span lang="en">Silent, but kept</span></td>
           </tr>
         </tbody>
       </table>
@@ -729,75 +910,141 @@
   <hr class="rule">
 
   <section>
-    <h2>快捷键</h2>
+    <h2 lang="zh">快捷键</h2>
+    <h2 lang="en">Keyboard shortcuts</h2>
     <div class="keys">
-      <div class="key-row"><span><kbd>Enter</kbd></span><span>发送消息</span></div>
-      <div class="key-row"><span><kbd>Shift</kbd> + <kbd>Enter</kbd></span><span>在消息里换行</span></div>
-      <div class="key-row"><span><kbd>@</kbd></span><span>打开提及候选名单</span></div>
-      <div class="key-row"><span><kbd>↑</kbd> <kbd>↓</kbd></span><span>在候选名单里选人</span></div>
-      <div class="key-row"><span><kbd>Tab</kbd> 或 <kbd>Enter</kbd></span><span>确认选中的人</span></div>
-      <div class="key-row"><span><kbd>Esc</kbd></span><span>关掉候选名单，或关掉通知 / 设置面板</span></div>
+      <div class="key-row">
+        <span><kbd>Enter</kbd></span>
+        <span class="desc"><span lang="zh">发送消息</span><span lang="en">Send the message</span></span>
+      </div>
+      <div class="key-row">
+        <span><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
+        <span class="desc"><span lang="zh">在消息里换行</span><span lang="en">Start a new line</span></span>
+      </div>
+      <div class="key-row">
+        <span><kbd>@</kbd></span>
+        <span class="desc"><span lang="zh">打开提及候选名单</span><span lang="en">Open the mention list</span></span>
+      </div>
+      <div class="key-row">
+        <span><kbd>↑</kbd> <kbd>↓</kbd></span>
+        <span class="desc"><span lang="zh">在候选名单里选人</span><span lang="en">Move through the mention list</span></span>
+      </div>
+      <div class="key-row">
+        <span><kbd>Tab</kbd> <span lang="zh">或</span><span lang="en">or</span> <kbd>Enter</kbd></span>
+        <span class="desc"><span lang="zh">确认选中的人</span><span lang="en">Confirm the person you picked</span></span>
+      </div>
+      <div class="key-row">
+        <span><kbd>Esc</kbd></span>
+        <span class="desc">
+          <span lang="zh">关掉候选名单，或关掉通知 / 设置面板</span>
+          <span lang="en">Dismiss the mention list, or close the notification / settings panel</span>
+        </span>
+      </div>
     </div>
   </section>
 
   <hr class="rule">
 
   <section>
-    <h2>常见问题</h2>
+    <h2 lang="zh">常见问题</h2>
+    <h2 lang="en">Common questions</h2>
 
     <div class="qa">
       <div class="qa-item">
-        <h3>我打不开这个网址</h3>
-        <p>
+        <h3 lang="zh">我打不开这个网址</h3>
+        <h3 lang="en">The address won't open</h3>
+        <p lang="zh">
           按顺序查三件事：Tailscale 是不是「已连接」；网址有没有打错（注意端口 <kbd>:3000</kbd>）；
           最后问一下服务器主人，他的电脑是不是睡眠了。聊天室跑在他那台机器上，机器一睡，所有人都进不来。
         </p>
+        <p lang="en">
+          Check three things in order: is Tailscale connected; is the address exactly right
+          (mind the <kbd>:3000</kbd> port); and finally, ask whoever runs the server whether
+          their computer has gone to sleep. The chat room runs on their machine — if it sleeps,
+          nobody can get in.
+        </p>
       </div>
 
       <div class="qa-item">
-        <h3>提示密码错误，试了几次就不让试了</h3>
-        <p>
+        <h3 lang="zh">提示密码错误，试了几次就不让试了</h3>
+        <h3 lang="en">It says my password is wrong, and now it won't let me try</h3>
+        <p lang="zh">
           同一个用户名连续输错 5 次会开始锁定，等待时间逐次翻倍，最长 5 分钟。
           这是防别人猜密码的，等一会儿再试就好。
         </p>
-      </div>
-
-      <div class="qa-item">
-        <h3>我忘记密码了</h3>
-        <p>
-          没有自助找回。只能找搭服务器的人帮你处理 —— 他需要手动改服务器上的数据文件。
+        <p lang="en">
+          Five wrong passwords in a row for one username starts a lockout, and the wait doubles
+          each time, up to five minutes. It is there to stop other people guessing. Wait a
+          little and try again.
         </p>
       </div>
 
       <div class="qa-item">
-        <h3>为什么我又被登出了</h3>
-        <p>
+        <h3 lang="zh">我忘记密码了</h3>
+        <h3 lang="en">I forgot my password</h3>
+        <p lang="zh">
+          没有自助找回。只能找搭服务器的人帮你处理 —— 他需要手动改服务器上的数据文件。
+        </p>
+        <p lang="en">
+          There is no self-service reset. Ask whoever runs the server — they have to edit the
+          data file on the machine by hand.
+        </p>
+      </div>
+
+      <div class="qa-item">
+        <h3 lang="zh">为什么我又被登出了</h3>
+        <h3 lang="en">Why was I signed out again?</h3>
+        <p lang="zh">
           两种可能：你关掉了标签页（登录状态按标签页存），或者服务器重启了（登录状态存在内存里，一重启就清空）。
           重新输一次用户名密码即可，聊天记录不会丢。
         </p>
+        <p lang="en">
+          Two possibilities: you closed the tab (sign-in is stored per tab), or the server
+          restarted (sign-ins live in memory and are cleared on restart). Sign in again — no
+          messages are lost.
+        </p>
       </div>
 
       <div class="qa-item">
-        <h3>手机上怎么切频道</h3>
-        <p>
+        <h3 lang="zh">手机上怎么切频道</h3>
+        <h3 lang="en">How do I switch channels on a phone?</h3>
+        <p lang="zh">
           屏幕窄的时候左边栏默认是收起的，点左上角的 <b>☰</b> 就能叫出来。
           选好频道或私信之后它会自动收回；也可以点旁边的暗色区域，或者按 <kbd>Esc</kbd> 关掉。
         </p>
-      </div>
-
-      <div class="qa-item">
-        <h3>消息会一直留着吗</h3>
-        <p>
-          每个频道和每段私信只保留<b>最近 500 条</b>，铃铛里只保留<b>最近 100 条</b>通知，
-          再早的会被自动丢掉。所以别把它当资料库用。
+        <p lang="en">
+          On a narrow screen the sidebar starts collapsed — tap <b>☰</b> at the top left to slide
+          it out. It closes itself once you pick a channel or a conversation; you can also tap
+          the dimmed area beside it, or press <kbd>Esc</kbd>.
         </p>
       </div>
 
       <div class="qa-item">
-        <h3>安全吗</h3>
-        <p>
+        <h3 lang="zh">消息会一直留着吗</h3>
+        <h3 lang="en">Are messages kept forever?</h3>
+        <p lang="zh">
+          每个频道和每段私信只保留<b>最近 500 条</b>，铃铛里只保留<b>最近 100 条</b>通知，
+          再早的会被自动丢掉。所以别把它当资料库用。
+        </p>
+        <p lang="en">
+          Each channel and each conversation keeps only the <b>last 500 messages</b>, and the
+          bell keeps the <b>last 100 notifications</b>. Anything older is dropped. Do not use it
+          as an archive.
+        </p>
+      </div>
+
+      <div class="qa-item">
+        <h3 lang="zh">安全吗</h3>
+        <h3 lang="en">Is it secure?</h3>
+        <p lang="zh">
           密码是加盐哈希后存的，服务器上看不到你的明文密码。但这个服务<b>没有 HTTPS</b> ——
           安全性完全靠 Tailscale 那层加密。所以：只在 Tailscale 里用，别把这个地址转发到公网上。
+        </p>
+        <p lang="en">
+          Passwords are stored salted and hashed, so nobody can read yours off the server. But
+          the service itself has <b>no HTTPS</b> — its security rests entirely on Tailscale's
+          encryption. So: use it inside Tailscale only, and never forward this address to the
+          public internet.
         </p>
       </div>
     </div>
@@ -806,9 +1053,32 @@
   <hr class="rule">
 
   <footer>
-    有问题、或者发现哪里不对，直接在 <b>#general</b> 里说就好。
+    <span lang="zh">有问题、或者发现哪里不对，直接在 <b>#general</b> 里说就好。</span>
+    <span lang="en">Something wrong, or something missing? Just say so in <b>#general</b>.</span>
   </footer>
 
 </div>
+
+<script>
+  (function () {
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('.lang-switch button'));
+
+    function apply(lang) {
+      document.documentElement.setAttribute('data-lang', lang);
+      document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      buttons.forEach(function (button) {
+        button.setAttribute('aria-pressed', String(button.dataset.lang === lang));
+      });
+      try { localStorage.setItem('teamchat.manual.lang', lang); } catch (e) { /* 隐私模式，忽略 */ }
+    }
+
+    buttons.forEach(function (button) {
+      button.addEventListener('click', function () { apply(button.dataset.lang); });
+    });
+
+    // 与页首那段脚本已经定好的语言对齐
+    apply(document.documentElement.getAttribute('data-lang') === 'en' ? 'en' : 'zh');
+  })();
+</script>
 </body>
 </html>

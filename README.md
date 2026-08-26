@@ -121,9 +121,10 @@ The least-effort safe option is [Tailscale](https://tailscale.com): everyone ins
 and joins your tailnet, then opens `http://<your-machine>:3000`. Traffic is encrypted by
 WireGuard, and nobody outside the tailnet can reach the server at all. No code changes.
 
-A user guide for the people you invite (in Chinese) is served alongside the app at
-`http://<your-machine>:3000/manual.html`, and linked from the sign-in screen. It covers
-signing in, the unread badge colours, and how mutes and quiet hours interact.
+A user guide for the people you invite is served alongside the app at
+`http://<your-machine>:3000/manual.html`, and linked from the sign-in screen. It is
+bilingual -- a switch at the top picks Chinese or English, and the choice is remembered --
+and covers signing in, the unread badge colours, and how mutes and quiet hours interact.
 
 If you ever do expose it publicly, TLS stops being optional — terminate it with Caddy or
 Cloudflare in front, and read the limitations below first.
