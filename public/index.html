@@ -24,13 +24,14 @@
     <p id="signin-error" class="error" hidden></p>
     <button type="submit" class="primary" id="signin-submit">Join</button>
     <p class="hint">Usernames are 2–32 characters: letters, numbers, dot, dash, underscore.</p>
+    <p class="hint"><a class="guide-link" href="/manual.html" target="_blank" rel="noopener">使用手册 →</a></p>
   </form>
 </div>
 
 <!-- ──────────────────────────────  app  ─────────────────────────────── -->
 <div id="app" class="app" hidden>
 
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <header class="me">
       <div class="avatar" id="me-avatar"></div>
       <div class="me-text">
@@ -70,7 +71,13 @@
   </aside>
 
   <main class="main">
-    <header class="conversation-header" id="conversation-header"></header>
+    <header class="conversation-header">
+      <button class="menu-btn" id="btn-menu" aria-controls="sidebar" aria-expanded="false"
+              aria-label="Show channels and direct messages">
+        <span aria-hidden="true">☰</span>
+      </button>
+      <div class="header-content" id="header-content"></div>
+    </header>
     <div class="messages" id="messages" tabindex="0"></div>
     <div class="composer-wrap">
       <div class="mention-popup" id="mention-popup" hidden></div>
@@ -132,6 +139,7 @@
     </div>
   </div>
 
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
   <div class="scrim" id="scrim" hidden></div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
 </div>

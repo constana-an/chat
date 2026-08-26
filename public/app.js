@@ -411,7 +411,8 @@ function renderConversation() {
 }
 
 function renderHeader() {
-  const header = $('conversation-header');
+  // 只替换内容容器 —— 汉堡按钮是 header 的静态子元素，不能被清掉
+  const header = $('header-content');
   header.replaceChildren();
   if (!state.current) {
     header.append(el('div', 'title', 'Team Chat'));
@@ -564,7 +565,7 @@ async function openChannel(channelId) {
   renderMessages();
   scrollToBottom();
   markCurrentRead();
-  $('composer-input').focus();
+  focusComposer();
 }
 
 async function openDm(userId) {
@@ -582,7 +583,7 @@ async function openDm(userId) {
   renderConversation();
   scrollToBottom();
   markCurrentRead();
-  $('composer-input').focus();
+  focusComposer();
 }
 
 async function markCurrentRead() {
@@ -862,8 +863,24 @@ for (const id of ['qh-enabled', 'qh-start', 'qh-end', 'qh-allow-direct']) {
 
 // ─────────────────────────  panels, dialogs, toasts  ─────────────────────
 
+/**
+ * 窄屏下侧边栏是浮层。桌面端 CSS 里它常驻，这个开关不起作用。
+ */
+const isNarrow = () => window.matchMedia('(max-width: 720px)').matches;
+
+function setSidebar(open) {
+  $('app').classList.toggle('show-sidebar', open);
+  $('btn-menu').setAttribute('aria-expanded', String(open));
+}
+
+$('btn-menu').addEventListener('click', () => {
+  setSidebar(!$('app').classList.contains('show-sidebar'));
+});
+$('sidebar-backdrop').addEventListener('click', () => setSidebar(false));
+
 function openPanel(id) {
   closePanels();
+  setSidebar(false);
   $(id).hidden = false;
   $('scrim').hidden = false;
 }
@@ -879,7 +896,9 @@ for (const button of document.querySelectorAll('[data-close-panel]')) {
 $('btn-inbox').addEventListener('click', () => { renderInbox(); openPanel('inbox-panel'); });
 $('btn-settings').addEventListener('click', () => { renderSettings(); openPanel('settings-panel'); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closePanels();
+  if (event.key !== 'Escape') return;
+  closePanels();
+  setSidebar(false);
 });
 
 const dialog = $('new-channel-dialog');
@@ -946,6 +965,12 @@ function beep(higher) {
 }
 
 // ──────────────────────────────  helpers  ────────────────────────────────
+
+/** 打开会话后：收起浮层侧边栏，桌面端才把焦点给输入框。 */
+function focusComposer() {
+  setSidebar(false);
+  if (!isNarrow()) $('composer-input').focus();
+}
 
 function isScrolledToBottom() {
   const box = $('messages');
