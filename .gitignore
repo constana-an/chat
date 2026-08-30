@@ -1,2 +1,5 @@
 node_modules/
 data/db.json
+
+# 提交用的压缩包不进仓库
+*.zip
