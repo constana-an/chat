@@ -1,0 +1,74 @@
+A1 — Alternative design: notifications by subscription, not by push
+Same boundary, same three connection points. The one decision changed: the decision moves from write time to read time. A message is appended once; a user's notifications are derived from their
+standing rules instead of written into a per-user inbox. Components are labelled by responsibility (not implemented).
+
+
+                                                N O T I F I C AT I O N S Y S T E M ( s u b s c r i p t i o n )
+
+
+    MESSAGES                                            Message log                                                                                                          Subscription rules
+                                                        append-only; the single source                                                                                       what each user stands to hear                         USERS
+    unchanged: a message           one append
+    still carries scope                                 one append per message                                                                                               one list per user, e.g.                               holds one uniform list
+    and mentions[]                                      — no per-recipient work                                  entries
+                                                                                                                                                                             · direct messages → now                               of rules instead of two
+    gains a visible-from       ②                        entries carry a
+                                                        visible-from time                                 ②
+                                                                                                                                                                             · @me → now
+                                                                                                                                                                             · #general → digest
+                                                                                                                                                                                                                                   separate preference
+                                                                                                                                                                                                                                   shapes
+                                                                                                                           Matcher
+                                                                                                                           rules × entry → match?
+                                                                                                                                                                     rules
+                                                                                                                                                                             · #eng → none until 15:40       ①                     mutedChannels +
+                                                                                                                                                                             mute, quiet hours and                                 quietHours collapse
+                                                                                                                                                                             snooze are all just rules                             into subscriptions
+                                                                                                                           pure, like the current
+                                                                                                                           decision function                                 — one shape, not three
+    CHANNELS
+                                                                                                                           but evaluated when
+    unchanged — supplies                                 which channel an entry is in
+                                                                                                                           you look, not when
+    membership and the                                                                                                     the message is sent
+    channel a rule names                                                                                                                                                     Urgency router
+                                                                                                                           an expired rule simply
+    no longer a fan-out list                                                                                                                                                 how loud, and how soon
+                                                                                                                           stops matching — no
+                                                                                                                           timer needed                        ①             reads the urgency the
+                                                                                                                                                                             matched rule declares
+
+                                                                                                                                                     matches
+                                                                                                                                                                             immediate · digest · silent     ③
+                                                                                                                                                                                           immediate             held
+
+                                                        Read cursors                                                       Inbox query
+                                                        the only stored state                                              derives; stores nothing                           Live push
+                                                                                                                                                                             wakes open tabs
+                                                        “what have I seen”                                                 replaces the stored
+                                                                                                                 since
+                                                        the design already does                                            inbox entirely                                    sends “something changed”,
+                                                        this for unread counts —                                           “entries since my cursor                          not the notification itself
+                                                        notifications now match                                            that match my rules”
+                                                        must also hold what is                                             nothing to cap, evict,
+
+                                                                                                                                                                                                             ③
+                                                        NOT derivable: read flags,                                         or keep in sync
+                                                        superseded entries                                                                                                   Digest
+                                                                                                                                                                             the same query, on a timer
+
+                                                                                                                                                                             no pending bucket — it
+                                                                                                                                                                             re-runs the inbox query
+                                                                                                                                                                             since the digest cursor
+
+
+
+
+  1 · What I changed                                               2 · Which quality it improves                                                        3 · What it costs                                               Legend
+  [your words — the one decision you made                          [your words — name the quality and say what gets                                     [your words — what gets harder or worse]                        →              data flow, labelled
+  differently, and why]                                            easier]                                                                                                                                              bold           changed from the as-built
+                                                                                                                                                                                                                        grey box       outside the boundary
+                                                                                                                                                                                                                        ①②③            where change 1 (snooze), 2
+                                                                                                                                                                                                                                       (scheduled) and 3 (digest)
+                                                                                                                                                                                                                                       would land — draft, check it
+

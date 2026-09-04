@@ -1,0 +1,69 @@
+A1 — As-built design: the notification system
+Team Chat (Node, zero dependencies). Arrows show data flow, labelled with what crosses them. Every component carries its module and line. Grey boxes are outside the notification boundary.
+
+
+                                                       N O T I F I C AT I O N S Y S T E M
+
+
+    MESSAGES                                                  parseMentions()
+    store.js:389, :406, :419                text              notifications.js:29
+
+    scope: channel | direct                                   “@grace” → user id
+    mentions: [userId]                                        skips emails, paths,
+    a DM stamps its                                           trailing punctuation
+                                          mentions[]                                                            routeMessage()                                            isChannelMuted()                       USERS
+    recipient (:429);
+                                                                                                                notifications.js:107 · pure                               notifications.js:150                   store.js:142
+    a channel message
+    is parsed (:392)
+                                                                                                                THE DECISION — returns:                                   read at :108, before                   preferences only —
+                                         Message                                                                                                                          kind is fixed                          the decision reads
+                                                              deliver()                                         kind = direct | mention
+                                                                                                                                                                          flags only; gates nothing              them, never writes
+                                                              routes.js:238                                     | activity (:110)
+                                                                                                                                                                                                                 prefs.mutedChannels
+                                                                                                                inbox = kind !== 'activity'
+                                                              one pass per recipient                                                                                                                             prefs.quietHours
+                                                                                                                :114 — see note 1
+                                                              asks routeMessage for
+    CHANNELS                                                  a decision (:255)                                 alert = inbox && !quiet                                   isQuietHoursActive()                   .start / .end
+    routes.js:191                                                                                               :127                                                      notifications.js:70                    .tzOffsetMinutes
+                                          members             acts on it; the author
+                                                                                                                                                                                                                 .allowDirect
+    channel.members                                           is skipped (:276)                                 bypassedMute (:130)                                       window in the user’s
+    decides the audience                                      the only place the                                countsAsUnread = true                                     timezone; wraps midnight               (sanitised at :160)
+                                                                                                     decision
+    channel.id                                                decision is applied                               :125
+                                                                                                                                                                          gates alert only,
+    is what a mute keys on                                                                                      reads users + channels;                                   never inbox — note 3
+                                                                                                if inbox        writes nothing
+
+                                                                           always
+                                                                                                                                           message + unread, to every recipient
+
+
+
+
+                                                              unreadFor()                                       addNotification()                                         hub.send()
+                                                              store.js:449                                      store.js:496                                              hub.js:36
+
+                                                              counts back from the                              the inbox — appended                                      pushes to every open
+                                                              read cursor; nothing                              only when decision.inbox                                  tab of that user (SSE)
+                                                              is stored per message                             is true (:276, :278)
+                                                                                                                                                                          ? no delivery guarantee
+                                                              called unconditionally                            ? capped at 100 (:499)                                    if nobody is connected
+                                                              (:271) — see note 2
+
+
+
+
+  1 · A mute cannot reach the inbox gate                                2 · Unread is computed, not notified                                3 · Two stages, failing in different directions           Legend
+  The only test for whether a message becomes a                         unreadFor() walks back from a read cursor on                        Stage 1 decides existence (inbox) from kind alone.        →               data flow, labelled
+  notification is inbox = kind !== 'activity'.                          demand; no counter is written when a message                        Stage 2 decides loudness (alert) and is the only          dashed          notification-system
+  muted is read one line earlier but appears nowhere                    arrives. deliver() calls it for every recipient with                thing quiet hours touch — so quiet hours can                              boundary
+  in that expression, so a DM or an @mention is                         no reference to the decision, so muting silences                    silence a notification but never delete one.              grey box        outside the boundary
+  structurally unsuppressable — not by a special                        alerts and never hides activity.                                    Evidence: notifications.js:114 vs :120 and :127.          bold box        where the decision is made
+  case, but by an absence.                                              Evidence: store.js:449; called unconditionally at                                                                             ?               could not determine from
+  Evidence: notifications.js:108 vs :114; the flag is                   routes.js:271.                                                                                                                                the code whether this is
+  used only at :129–130.                                                                                                                                                                                              intended
+
