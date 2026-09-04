@@ -7,6 +7,8 @@ import {
   isQuietHoursActive,
   parseClock,
   parseMentions,
+  isChannelMuted,
+  mutedUntil,
   routeMessage,
   sanitizeQuietHours,
 } from '../server/notifications.js';
@@ -166,4 +168,61 @@ test('sanitizeQuietHours rejects junk and keeps current values', () => {
   assert.equal(sanitizeQuietHours({ enabled: 'yes' }, current).enabled, true);
   assert.equal(sanitizeQuietHours({ tzOffsetMinutes: 99999 }, current).tzOffsetMinutes, 0);
   assert.equal(sanitizeQuietHours(null, current).start, '21:00');
+});
+
+// ───────────────────────────────── snooze (change 1) ─────────────────────
+
+const snoozed = (until) => ({ id: 'u_ada', prefs: { mutedChannels: new Map([['ch_1', until]]) } });
+
+test('a snooze ends by being in the past — nothing has to lift it', () => {
+  const noon = Date.UTC(2026, 7, 30, 12, 0, 0);
+  const user = snoozed(noon + 60 * 60_000);   // muted for an hour
+
+  assert.equal(isChannelMuted(user, 'ch_1', noon), true, 'muted at the start');
+  assert.equal(isChannelMuted(user, 'ch_1', noon + 59 * 60_000), true, 'still muted at 59 minutes');
+  assert.equal(isChannelMuted(user, 'ch_1', noon + 60 * 60_000), false, 'exactly on the hour it is over');
+  assert.equal(isChannelMuted(user, 'ch_1', noon + 61 * 60_000), false, 'and after');
+
+  // No timer ran, no state changed -- the same record answers differently
+  // only because the clock moved.
+  assert.equal(mutedUntil(user, 'ch_1'), noon + 60 * 60_000, 'the record is untouched');
+});
+
+test('an indefinite mute never lapses, and an unmuted channel is never muted', () => {
+  const forever = snoozed(null);
+  assert.equal(isChannelMuted(forever, 'ch_1', 0), true);
+  assert.equal(isChannelMuted(forever, 'ch_1', 8.64e15), true, 'still muted in the far future');
+
+  assert.equal(isChannelMuted(forever, 'ch_other'), false);
+  assert.equal(mutedUntil(forever, 'ch_other'), undefined, 'undefined means "not muted at all"');
+  assert.equal(mutedUntil(forever, 'ch_1'), null, 'null means "muted, with no end"');
+});
+
+test('mutes stored before snooze existed still read as indefinite', () => {
+  for (const stored of [new Set(['ch_1']), ['ch_1'], { ch_1: null }]) {
+    const user = { id: 'u_ada', prefs: { mutedChannels: stored } };
+    assert.equal(isChannelMuted(user, 'ch_1', Date.now()), true, String(stored));
+    assert.equal(isChannelMuted(user, 'ch_2', Date.now()), false);
+  }
+});
+
+test('a snooze changes nothing about what a mute means', () => {
+  const noon = Date.UTC(2026, 7, 30, 12, 0, 0);
+  const user = { ...snoozed(noon + 60 * 60_000), prefs: { mutedChannels: new Map([['ch_1', noon + 3600_000]]) } };
+  const at = (t) => new Date(t);
+
+  // Still counted, still silent -- the snooze only decides *whether* muted.
+  const activity = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: [], now: at(noon) });
+  assert.equal(activity.channelMuted, true);
+  assert.equal(activity.countsAsUnread, true, 'a snoozed channel still counts unread');
+  assert.equal(activity.alert, false);
+
+  // And a mention still gets through, exactly as with an indefinite mute.
+  const mention = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: ['u_ada'], now: at(noon) });
+  assert.equal(mention.bypassedMute, true);
+  assert.equal(mention.alert, true);
+
+  // An hour later the channel is simply not muted any more.
+  const later = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: [], now: at(noon + 3700_000) });
+  assert.equal(later.channelMuted, false);
 });

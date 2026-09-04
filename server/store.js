@@ -22,6 +22,16 @@ import { describeRoll, looksLikeRoll, parseRollCommand, rollDice } from './games
 
 const scrypt = promisify(crypto.scrypt);
 
+/** A week, so a "snooze" cannot quietly become a permanent mute. */
+const MAX_SNOOZE_MINUTES = 7 * 24 * 60;
+
+/** Read any stored mute shape into channelId -> expiry (null = indefinite). */
+function readMutes(stored) {
+  if (Array.isArray(stored)) return new Map(stored.map((id) => [id, null]));   // pre-snooze data
+  if (stored && typeof stored === 'object') return new Map(Object.entries(stored));
+  return new Map();
+}
+
 /** Keep memory bounded; history older than this is dropped per conversation. */
 const MAX_HISTORY = 500;
 
@@ -72,7 +82,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
           ...u,
           channels: new Set(u.channels ?? []),
           prefs: {
-            mutedChannels: new Set(u.prefs?.mutedChannels ?? []),
+            mutedChannels: readMutes(u.prefs?.mutedChannels),
             quietHours: { ...DEFAULT_QUIET_HOURS, ...(u.prefs?.quietHours ?? {}) },
           },
         };
@@ -94,12 +104,19 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
   }
 
   function snapshot() {
+    // Expired mutes are dead weight; drop them on the way out.
+    const now = Date.now();
+    for (const user of state.users.values()) {
+      for (const [channelId, until] of user.prefs.mutedChannels) {
+        if (until != null && until <= now) user.prefs.mutedChannels.delete(channelId);
+      }
+    }
     return {
       seq: state.seq,
       users: [...state.users.values()].map((u) => ({
         ...u,
         channels: [...u.channels],
-        prefs: { mutedChannels: [...u.prefs.mutedChannels], quietHours: u.prefs.quietHours },
+        prefs: { mutedChannels: Object.fromEntries(u.prefs.mutedChannels), quietHours: u.prefs.quietHours },
       })),
       channels: [...state.channels.values()].map((c) => ({ ...c, members: [...c.members] })),
       conversations: [...state.conversations.values()],
@@ -139,7 +156,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       name,
       createdAt: Date.now(),
       channels: new Set(),
-      prefs: { mutedChannels: new Set(), quietHours: { ...DEFAULT_QUIET_HOURS } },
+      prefs: { mutedChannels: new Map(), quietHours: { ...DEFAULT_QUIET_HOURS } },
     };
     state.users.set(user.id, user);
     state.usersByName.set(name, user.id);
@@ -477,11 +494,24 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
 
   // ------------------------------------------------------------- prefs & inbox
 
-  function setChannelMute(userId, channelId, muted) {
+  /**
+   * @param {number|null} [minutes] how long to stay muted. Omitted means
+   *   indefinitely — the mute only ends when someone unmutes it.
+   */
+  function setChannelMute(userId, channelId, muted, minutes = null) {
     const user = mustUser(userId);
     mustChannel(channelId);
-    if (muted) user.prefs.mutedChannels.add(channelId);
-    else user.prefs.mutedChannels.delete(channelId);
+    if (!muted) {
+      user.prefs.mutedChannels.delete(channelId);
+    } else if (minutes == null) {
+      user.prefs.mutedChannels.set(channelId, null);
+    } else {
+      const span = Number(minutes);
+      if (!Number.isFinite(span) || span <= 0 || span > MAX_SNOOZE_MINUTES) {
+        throw httpError(400, `Snooze between 1 and ${MAX_SNOOZE_MINUTES} minutes.`);
+      }
+      user.prefs.mutedChannels.set(channelId, Date.now() + span * 60_000);
+    }
     save();
     return user.prefs;
   }

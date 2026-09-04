@@ -281,7 +281,7 @@ function onPresence({ userId, online }) {
 
 function onChannelCreated(channel) {
   if (!state.channels.has(channel.id)) {
-    state.channels.set(channel.id, { ...channel, joined: false, muted: false, unread: 0, mentions: 0 });
+    state.channels.set(channel.id, { ...channel, joined: false, muted: false, mutedUntil: null, unread: 0, mentions: 0 });
     renderSidebar();
   }
 }
@@ -363,6 +363,8 @@ function renderSidebar() {
     .filter((t) => t.lastMessage)
     .sort((a, b) => (b.lastMessage?.ts ?? 0) - (a.lastMessage?.ts ?? 0));
   renderList($('dm-list'), threads, (thread) => dmItem(thread.userId, thread));
+
+  scheduleMuteTick();
 
   const chatted = new Set(threads.map((t) => t.userId));
   const others = [...state.users.values()].filter((u) => !chatted.has(u.id));
@@ -446,9 +448,11 @@ function renderHeader() {
     const actions = el('div', 'header-actions');
     actions.append(el('span', 'muted', `${channel.memberCount} member${channel.memberCount === 1 ? '' : 's'}`));
 
-    const mute = el('button', `chip${channel.muted ? ' on' : ''}`, channel.muted ? '🔕 Muted' : '🔔 Mute');
+    const mute = el('button', `chip${channel.muted ? ' on' : ''}`, muteLabel(channel));
     mute.title = channel.muted
-      ? 'Muted: unread still counts; DMs and @mentions still alert you'
+      ? (channel.mutedUntil
+          ? `Snoozed until ${new Date(channel.mutedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+          : 'Muted: unread still counts; DMs and @mentions still alert you')
       : 'Mute alerts for this channel';
     mute.onclick = () => setMute(channel.id, !channel.muted);
     actions.append(mute);
@@ -680,12 +684,43 @@ async function leaveChannel(channelId) {
   renderConversation();
 }
 
-async function setMute(channelId, muted) {
-  const { channel } = await api('PATCH', `/api/channels/${channelId}/prefs`, { muted });
+async function setMute(channelId, muted, minutes = null) {
+  const { channel } = await api('PATCH', `/api/channels/${channelId}/prefs`, { muted, minutes });
   state.channels.set(channel.id, channel);
   renderSidebar();
   renderHeader();
   renderSettings();
+}
+
+function muteLabel(channel) {
+  if (!channel.muted) return '🔔 Mute';
+  if (!channel.mutedUntil) return '🔕 Muted';
+  return `🔕 ${remainingMute(channel.mutedUntil)}`;
+}
+
+function remainingMute(until) {
+  const minutes = Math.max(0, Math.ceil((until - Date.now()) / 60_000));
+  return minutes >= 60 ? `${Math.ceil(minutes / 60)}h` : `${minutes}m`;
+}
+
+/**
+ * The server lifts a snooze by simply letting the clock pass it — nothing is
+ * pushed when it lapses. So the client has to notice on its own, or the
+ * sidebar keeps showing 🔕 for an hour after the mute ended.
+ */
+let muteTimer = null;
+function scheduleMuteTick() {
+  clearTimeout(muteTimer);
+  const pending = [...state.channels.values()].filter((c) => c.muted && c.mutedUntil);
+  if (!pending.length) return;
+
+  const soonest = Math.min(...pending.map((c) => c.mutedUntil));
+  // Wake at the expiry, or in a minute to keep the countdown honest.
+  const wait = Math.min(60_000, Math.max(1000, soonest - Date.now() + 500));
+  muteTimer = setTimeout(() => {
+    if (soonest <= Date.now()) refreshState().catch(() => {});
+    else { renderSidebar(); renderHeader(); renderSettings(); }
+  }, wait);
 }
 
 // ──────────────────────────────  composer  ───────────────────────────────
@@ -890,7 +925,17 @@ function renderSettings() {
   for (const channel of joined) {
     const li = el('li');
     li.append(el('span', 'label', `#${channel.name}`));
-    if (channel.muted) li.append(el('span', 'muted-note', `${channel.unread} unread, silent`));
+    if (channel.muted) {
+      li.append(el('span', 'muted-note', channel.mutedUntil
+        ? `until ${new Date(channel.mutedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        : `${channel.unread} unread, silent`));
+    } else {
+      const snooze = el('button', 'snooze-btn', '1h');
+      snooze.type = 'button';
+      snooze.title = 'Mute for one hour, then unmute itself';
+      snooze.onclick = () => setMute(channel.id, true, 60);
+      li.append(snooze);
+    }
     const label = el('label', 'switch');
     const box = el('input');
     box.type = 'checkbox';

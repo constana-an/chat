@@ -9,7 +9,7 @@
 import crypto from 'node:crypto';
 
 import { httpError, publicMessage, publicUser } from './store.js';
-import { isChannelMuted, isQuietHoursActive, routeMessage } from './notifications.js';
+import { isChannelMuted, isQuietHoursActive, mutedUntil, routeMessage } from './notifications.js';
 import {
   findMove,
   gameStatus,
@@ -195,7 +195,9 @@ export function createRouter({ store, hub }) {
   function setChannelPrefs({ user, params, body }) {
     requireAuth(user);
     const channelId = params[0];
-    if ('muted' in body) store.setChannelMute(user.id, channelId, Boolean(body.muted));
+    if ('muted' in body) {
+      store.setChannelMute(user.id, channelId, Boolean(body.muted), body.minutes ?? null);
+    }
     const channel = store.getChannel(channelId);
     hub.send(user.id, 'prefs', { channels: channelViews(user), quietHours: user.prefs.quietHours });
     return { channel: channelView(user, channel) };
@@ -743,7 +745,7 @@ export function createRouter({ store, hub }) {
       id: user.id,
       name: user.name,
       prefs: {
-        mutedChannels: [...user.prefs.mutedChannels],
+        mutedChannels: Object.fromEntries(user.prefs.mutedChannels),
         quietHours: user.prefs.quietHours,
       },
       quietHoursActive: isQuietHoursActive(user.prefs.quietHours),
@@ -767,6 +769,8 @@ export function createRouter({ store, hub }) {
       ...channelSummary(channel),
       joined,
       muted: isChannelMuted(user, channel.id),
+      // null when the mute is indefinite or absent; a timestamp when it lapses.
+      mutedUntil: isChannelMuted(user, channel.id) ? mutedUntil(user, channel.id) ?? null : null,
       lastMessage: last,
       ...counts,
     };

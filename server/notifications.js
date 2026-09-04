@@ -105,7 +105,7 @@ export function isQuietHoursActive(quietHours, now = new Date()) {
  * }}
  */
 export function routeMessage({ scope, recipient, mentions = [], channelId, now = new Date() }) {
-  const muted = isChannelMuted(recipient, channelId);
+  const muted = isChannelMuted(recipient, channelId, now.getTime());
   const mentioned = mentions.includes(recipient.id);
   const kind = scope === 'direct' ? 'direct' : mentioned ? 'mention' : 'activity';
 
@@ -147,11 +147,31 @@ function explain({ kind, muted, silencedByQuietHours, quietHoursActive, ringsThr
   return parts.join(' — ');
 }
 
-export function isChannelMuted(user, channelId) {
-  if (!channelId) return false;
+/**
+ * When does a channel's mute end?
+ *
+ * @returns {number|null|undefined} a timestamp for a mute that lapses on its own,
+ *   `null` for an indefinite mute, `undefined` when the channel is not muted.
+ *   Older stored shapes (a Set or an array of ids) mean an indefinite mute.
+ */
+export function mutedUntil(user, channelId) {
   const muted = user?.prefs?.mutedChannels;
-  if (!muted) return false;
-  return muted instanceof Set ? muted.has(channelId) : Array.isArray(muted) && muted.includes(channelId);
+  if (!muted || !channelId) return undefined;
+  if (muted instanceof Map) return muted.has(channelId) ? muted.get(channelId) : undefined;
+  if (muted instanceof Set) return muted.has(channelId) ? null : undefined;
+  if (Array.isArray(muted)) return muted.includes(channelId) ? null : undefined;
+  if (typeof muted === 'object') return channelId in muted ? muted[channelId] : undefined;
+  return undefined;
+}
+
+/**
+ * A timed mute ends by simply being in the past -- nothing has to wake up to
+ * lift it, which is why the server needs no scheduler for snooze.
+ */
+export function isChannelMuted(user, channelId, now = Date.now()) {
+  const until = mutedUntil(user, channelId);
+  if (until === undefined) return false;
+  return until === null || until > now;
 }
 
 /** Normalise a quiet-hours patch coming from the client. */

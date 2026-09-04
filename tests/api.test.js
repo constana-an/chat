@@ -988,3 +988,62 @@ test('a roll works in a direct message too, and does not eat ordinary text', asy
     assert.equal(plain.message.text, 'we should /roll for it');
   });
 });
+
+// ────────────────────────────── snooze (change 1) ───────────────────────
+
+test('a channel can be muted for a fixed time', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+
+    const before = Date.now();
+    const snoozed = await grace.call('PATCH', `/api/channels/${channel.id}/prefs`,
+      { muted: true, minutes: 60 });
+    assert.equal(snoozed.status, 200);
+    assert.equal(snoozed.channel.muted, true);
+
+    const until = snoozed.channel.mutedUntil;
+    assert.ok(typeof until === 'number', 'the view carries an end time');
+    const hour = 60 * 60_000;
+    assert.ok(until >= before + hour && until <= Date.now() + hour + 1000,
+      'roughly an hour from now, so a client can show the remaining time');
+
+    // While it lasts it behaves exactly like any other mute.
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'routine' });
+    assert.equal((await notificationsOf(grace)).length, 0, 'silent');
+    assert.equal((await channelOf(grace, channel.id)).unread, 1, 'but still counted');
+
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'over to you @grace' });
+    const [mention] = await notificationsOf(grace);
+    assert.equal(mention.bypassedMute, true, 'and a mention still gets through');
+  });
+});
+
+test('an indefinite mute reports no end time', async () => {
+  await withServer(async ({ signIn }) => {
+    const { grace, channel } = await twoUsersInAChannel(signIn);
+    const muted = await grace.call('PATCH', `/api/channels/${channel.id}/prefs`, { muted: true });
+    assert.equal(muted.channel.muted, true);
+    assert.equal(muted.channel.mutedUntil, null, 'null distinguishes "forever" from "until 15:40"');
+
+    const off = await grace.call('PATCH', `/api/channels/${channel.id}/prefs`, { muted: false });
+    assert.equal(off.channel.muted, false);
+    assert.equal(off.channel.mutedUntil, null);
+  });
+});
+
+test('a snooze cannot quietly become a permanent mute', async () => {
+  await withServer(async ({ signIn }) => {
+    const { grace, channel } = await twoUsersInAChannel(signIn);
+    const path = `/api/channels/${channel.id}/prefs`;
+
+    assert.equal((await grace.call('PATCH', path, { muted: true, minutes: 0 })).status, 400);
+    assert.equal((await grace.call('PATCH', path, { muted: true, minutes: -5 })).status, 400);
+    assert.equal((await grace.call('PATCH', path, { muted: true, minutes: 'soon' })).status, 400);
+
+    const tooLong = await grace.call('PATCH', path, { muted: true, minutes: 8 * 24 * 60 });
+    assert.equal(tooLong.status, 400);
+    assert.match(tooLong.error, /between 1 and \d+ minutes/);
+
+    assert.equal((await channelOf(grace, channel.id)).muted, false, 'and none of them muted anything');
+  });
+});
