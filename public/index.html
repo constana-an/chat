@@ -81,10 +81,17 @@
     <div class="messages" id="messages" tabindex="0"></div>
     <div class="composer-wrap">
       <div class="mention-popup" id="mention-popup" hidden></div>
+      <div class="scheduled-list" id="scheduled-list"></div>
       <form class="composer" id="composer">
         <textarea id="composer-input" rows="1" placeholder="Message" autocomplete="off"></textarea>
+        <button type="button" class="later-btn" id="btn-later" title="Send later" aria-label="Send later">🕐</button>
         <button type="submit" class="primary send" id="composer-send">Send</button>
       </form>
+      <div class="later-row" id="later-row" hidden>
+        <label for="later-at">Send at</label>
+        <input type="datetime-local" id="later-at">
+        <button type="button" class="chip" id="later-clear">Send now instead</button>
+      </div>
       <p class="composer-hint" id="composer-hint">Enter to send · Shift+Enter for a new line · @ to mention · /roll to throw dice</p>
     </div>
   </main>
@@ -146,6 +153,21 @@
           <span>Let direct messages ring through anyway</span>
         </label>
         <p class="status-line" id="qh-status"></p>
+      </section>
+
+      <section class="setting">
+        <h3>Digest</h3>
+        <p class="muted">Collect @mentions and deliver them together instead of one
+           interruption at a time. Direct messages are never held — that is what makes
+           them direct.</p>
+        <label class="switch">
+          <input type="checkbox" id="digest-enabled">
+          <span>Hold mentions for a digest</span>
+        </label>
+        <div class="row">
+          <label>Every <input type="number" id="digest-every" min="5" max="1440" step="5"> minutes</label>
+        </div>
+        <p class="status-line" id="digest-status"></p>
       </section>
 
       <section class="setting">

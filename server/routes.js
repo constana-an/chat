@@ -52,10 +52,14 @@ export function createRouter({ store, hub }) {
     ['POST', /^\/api\/games\/([\w]+)\/throw$/, throwRps],
     ['POST', /^\/api\/games\/([\w]+)\/resign$/, resignGame],
 
+    ['GET', /^\/api\/scheduled$/, listScheduled],
+    ['DELETE', /^\/api\/scheduled\/([\w]+)$/, cancelScheduled],
+
     ['POST', /^\/api\/read$/, markRead],
     ['GET', /^\/api\/notifications$/, getNotifications],
     ['POST', /^\/api\/notifications\/read$/, readNotifications],
     ['PATCH', /^\/api\/settings\/quiet-hours$/, setQuietHours],
+    ['PATCH', /^\/api\/settings\/digest$/, setDigest],
   ];
 
   function match(method, pathname) {
@@ -115,6 +119,7 @@ export function createRouter({ store, hub }) {
         rps: rpsSummary(user.id, store.activeGameIn(thread.conversationId, 'rps')),
       })),
       notifications: store.listNotifications(user.id),
+      scheduled: store.listScheduled(user.id),
       serverTime: Date.now(),
     };
   }
@@ -182,6 +187,11 @@ export function createRouter({ store, hub }) {
 
   function postChannelMessage({ user, params, body }) {
     requireAuth(user);
+    if (body.deliverAt != null) {
+      return scheduleFor(user, {
+        kind: 'channel', channelId: params[0], text: body.text, deliverAt: body.deliverAt,
+      });
+    }
     const message = store.postChannelMessage({
       channelId: params[0],
       authorId: user.id,
@@ -226,9 +236,61 @@ export function createRouter({ store, hub }) {
     requireAuth(user);
     const other = store.getUser(params[0]);
     if (!other) throw httpError(404, 'Unknown user.');
+    if (body.deliverAt != null) {
+      return scheduleFor(user, { kind: 'direct', toId: other.id, text: body.text, deliverAt: body.deliverAt });
+    }
     const message = store.postDirectMessage({ fromId: user.id, toId: other.id, text: body.text });
     deliver({ message, channel: null, recipients: [user.id, other.id] });
     return { message: publicMessage(message) };
+  }
+
+  // ------------------------------------------------------------- scheduling
+
+  let scheduler = null;
+
+  function scheduleFor(user, spec) {
+    const item = store.scheduleMessage({ authorId: user.id, ...spec });
+    // A newly scheduled item may be sooner than whatever the timer was waiting for.
+    scheduler?.armNext();
+    hub.send(user.id, 'scheduled', { scheduled: store.listScheduled(user.id) });
+    return { scheduled: item };
+  }
+
+  function listScheduled({ user }) {
+    requireAuth(user);
+    return { scheduled: store.listScheduled(user.id) };
+  }
+
+  function cancelScheduled({ user, params }) {
+    requireAuth(user);
+    const item = store.cancelScheduled(params[0], user.id);
+    scheduler?.armNext();
+    hub.send(user.id, 'scheduled', { scheduled: store.listScheduled(user.id) });
+    return { cancelled: item.id };
+  }
+
+  /**
+   * What the scheduler calls when a message comes due.
+   *
+   * It runs the *ordinary* post path — nothing about delivery, mentions or
+   * unread counting is special-cased for having been scheduled. That is the
+   * whole point of holding the write back rather than writing early and
+   * hiding it: mentions resolve now, seq is allocated now, unread starts now.
+   */
+  async function deliverScheduled(item) {
+    if (item.kind === 'channel') {
+      const message = store.postChannelMessage({
+        channelId: item.channelId, authorId: item.authorId, text: item.text,
+      });
+      const channel = store.getChannel(item.channelId);
+      deliver({ message, channel, recipients: [...channel.members] });
+    } else {
+      const message = store.postDirectMessage({
+        fromId: item.authorId, toId: item.toId, text: item.text,
+      });
+      deliver({ message, channel: null, recipients: [item.authorId, item.toId] });
+    }
+    hub.send(item.authorId, 'scheduled', { scheduled: store.listScheduled(item.authorId) });
   }
 
   // ---------------------------------------------------------------- delivery
@@ -278,6 +340,8 @@ export function createRouter({ store, hub }) {
       if (isAuthor || !decision.inbox) continue;
 
       const notification = store.addNotification(recipientId, {
+        // Held items are invisible until the digest fires.
+        pending: decision.delivery === 'digest',
         id: store.newId('n'),
         kind: decision.kind,
         conversationId: message.conversationId,
@@ -294,8 +358,35 @@ export function createRouter({ store, hub }) {
         reason: decision.reason,
       });
 
+      // A held item is not pushed; the digest that collects it will be.
+      if (decision.delivery === 'digest') {
+        scheduler?.armNext();
+        continue;
+      }
       hub.send(recipientId, 'notification', { notification });
     }
+  }
+
+  /**
+   * Send every digest that has come due.
+   *
+   * Quiet hours are evaluated **here**, at flush time, not when each item was
+   * held — the digest is one notification, so it is the digest that is or is
+   * not silenced. That is the only sensible answer to the two features
+   * overlapping, and nothing in the per-item decision could have given it.
+   */
+  function flushDigests(now = Date.now()) {
+    for (const userId of store.usersDueForDigest(now)) releaseDigest(userId, now);
+  }
+
+  /** Send one user's held items as a digest, whatever the reason for sending. */
+  function releaseDigest(userId, now = Date.now()) {
+    const user = store.getUser(userId);
+    if (!user) return null;
+    const quiet = isQuietHoursActive(user.prefs.quietHours, new Date(now));
+    const digest = store.flushDigest(userId, now, { alert: !quiet, silencedByQuietHours: quiet });
+    if (digest) hub.send(userId, 'notification', { notification: digest });
+    return digest;
   }
 
   // -------------------------------------------------------------------- chess
@@ -711,6 +802,18 @@ export function createRouter({ store, hub }) {
     return { remaining };
   }
 
+  function setDigest({ user, body }) {
+    requireAuth(user);
+    const digest = store.setDigest(user.id, body);
+    // Turning it off must release what it was holding. It cannot go through
+    // flushDigests(), which only looks at users who still have it switched on
+    // -- by now this user does not, so the held items would be stranded.
+    if (!digest.enabled) releaseDigest(user.id);
+    scheduler?.armNext();
+    hub.send(user.id, 'prefs', { channels: channelViews(user), quietHours: user.prefs.quietHours, digest });
+    return { digest, held: store.pendingDigest(user.id).length };
+  }
+
   function setQuietHours({ user, body }) {
     requireAuth(user);
     const quietHours = store.setQuietHours(user.id, body);
@@ -747,6 +850,7 @@ export function createRouter({ store, hub }) {
       prefs: {
         mutedChannels: Object.fromEntries(user.prefs.mutedChannels),
         quietHours: user.prefs.quietHours,
+        digest: user.prefs.digest,
       },
       quietHoursActive: isQuietHoursActive(user.prefs.quietHours),
     };
@@ -796,5 +900,11 @@ export function createRouter({ store, hub }) {
     if (!user) throw httpError(401, 'Pick a username first.');
   }
 
-  return { match };
+  return {
+    match,
+    deliverScheduled,
+    flushDigests,
+    /** Wired after construction because the scheduler needs deliverScheduled. */
+    useScheduler(instance) { scheduler = instance; },
+  };
 }

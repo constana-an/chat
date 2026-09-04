@@ -148,14 +148,93 @@ live server with a 3-second snooze — `muted` flipped on its own, and the only 
 
 ### Change 2 — Scheduled messages
 
-- **What it actually affected:**
-- **Rounds of instruction:**
-- **Where I intervened:**
-- **What was easy, what was hard, and why:**
+**What it actually affected**
+
+| Where | What |
+| --- | --- |
+| **new** `server/scheduler.js` | One timer for the whole app, not one per item: sleep until the soonest due thing, do everything due, re-arm. The wait is capped at 30 s so a suspended laptop or a clock jump makes a message late, never lost. |
+| `store.js` | A `scheduled` queue, persisted; `nextDueAt` / `dueScheduled` / `complete` / `fail`. |
+| `routes.js` | `deliverAt` on the two existing message endpoints; list and cancel; `deliverScheduled()`. |
+| `index.js` | Builds the scheduler and starts it **after** the store loads, so restarts recover. |
+| **outside the boundary:** `public/` | A clock button, a time input, and the pending queue with cancel. |
+
+**`deliver()` and `routeMessage()` were not touched. Zero lines.** The prediction held:
+holding the whole write back, rather than writing early and hiding it, meant a scheduled
+message becomes an ordinary message at delivery and takes the ordinary path. Mentions
+resolve then, `seq` is allocated then, unread starts then — for free, because nothing
+special happened. A scheduled `/roll` even rolls its dice at delivery, which nobody had to
+implement.
+
+**Rounds of instruction:** two. The first produced everything above and passed. The second
+was forced by the restart test.
+
+**Where I intervened:** *(yours)*
+
+**What was easy, what was hard**
+
+- **Easy — the notification system, entirely.** This change is the strongest evidence the
+  as-built boundary is drawn in the right place: the requirement that sounds most like
+  "notifications" turned out to have nothing to do with them.
+- **Hard — the thing nobody was looking at.** The restart test failed, and the cause was
+  not the scheduler. `save()` has always debounced writes by 250 ms. Losing a quarter
+  second of chat to a crash is a shrug; **losing a scheduled message is silent and
+  permanent, because nothing else records the intent.** A pre-existing weakness became
+  load-bearing the moment the app gained a notion of "later". Fixed with a `flush()` that
+  writes synchronously, used for scheduling and on `SIGINT`/`SIGTERM`.
+- **What the prediction missed:** that a change can be dangerous because of code it does
+  not touch. I predicted the components that would change; the real problem was in one
+  that did not.
+
+---
 
 ### Change 3 — Digest
 
-- **What it actually affected:**
-- **Rounds of instruction:**
-- **Where I intervened:**
-- **What was easy, what was hard, and why:**
+**What it actually affected**
+
+| Where | What |
+| --- | --- |
+| `notifications.js:107` | **`routeMessage()` itself.** A third stage and a `delivery: 'none' \| 'immediate' \| 'digest'` field. |
+| `notifications.js` | `DEFAULT_DIGEST`, `sanitizeDigest()`. |
+| `store.js` | `prefs.digest`; held entries carry `pending`; `listNotifications` hides them; `flushDigest`, `usersDueForDigest`; `nextDueAt` now considers digests too. |
+| `scheduler.js` | One new hook, `onSweep` — **the scheduler from change 2, reused unchanged.** |
+| `routes.js` | Held items are stored but not pushed; `flushDigests`; `PATCH /api/settings/digest`. |
+| **outside the boundary:** `public/` | A settings section and a summary entry that lists what it collected. |
+
+**Rounds of instruction:** two. The second was forced by two failing tests, one of which
+was a real bug.
+
+**Where I intervened:** *(yours)*
+
+**What was easy, what was hard**
+
+- **The prediction was right on all three counts.** This is the only change that modified
+  the decision function; it reused change 2's scheduler without altering it (which is why
+  the assignment insists on the order); and **the collision with quiet hours happened.**
+- **The collision, and how it resolved.** Both features mean "hold this back", by different
+  mechanisms. The answer is that quiet hours are evaluated **at flush time and applied to
+  the digest as one notification** — not to each held item as it arrives. Nothing in the
+  per-item decision could have produced that answer, because at hold time there is no
+  digest yet to silence.
+- **A real bug the tests caught.** Turning the digest *off* stranded everything it was
+  holding, forever: the release path only looked at users who still had the digest enabled,
+  and by then this user did not. Held items would have become invisible permanently. Found
+  by asserting the released count, not by reading the code.
+- **Easy — that batching did not disturb anything else.** A held mention still counts
+  unread and still ignores a channel mute, with no new code. Both invariants survived a
+  third delivery mode for the same reason they survived the first two: the mute was never
+  load-bearing, and unread was never a function of notifications.
+
+---
+
+## What the three changes say about the boundary
+
+Ranked by how much each one touched the notification system:
+
+| Change | Touched `routeMessage()` | Where the work actually was |
+| --- | --- | --- |
+| 2 · Scheduled | not one line | new infrastructure, and a latent persistence bug |
+| 1 · Snooze | one line (threading `now`) | the client, keeping a lapsed mute from looking live |
+| 3 · Digest | yes — a third stage | inside the boundary, plus reusing change 2's scheduler |
+
+The requirement that sounded most like a notification feature (scheduled messages) was the
+one that touched it least.

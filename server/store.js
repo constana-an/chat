@@ -12,15 +12,20 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import {
+  DEFAULT_DIGEST,
   DEFAULT_QUIET_HOURS,
   USERNAME_RE,
   parseMentions,
+  sanitizeDigest,
   sanitizeQuietHours,
 } from './notifications.js';
 import { initialPosition, repetitionKey, toFen } from './chess.js';
 import { describeRoll, looksLikeRoll, parseRollCommand, rollDice } from './games.js';
 
 const scrypt = promisify(crypto.scrypt);
+
+/** Far enough to be useful, near enough that a typo cannot schedule for 2085. */
+const MAX_SCHEDULE_AHEAD_MS = 365 * 24 * 60 * 60_000;
 
 /** A week, so a "snooze" cannot quietly become a permanent mute. */
 const MAX_SNOOZE_MINUTES = 7 * 24 * 60;
@@ -66,6 +71,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     online: new Map(),       // userId -> connection count
     loginFailures: new Map(),// username -> {count, until} -- deliberately not persisted
     games: new Map(),        // gameId -> game
+    scheduled: new Map(),    // id -> a message written now, to be sent later
   };
 
   let saveTimer = null;
@@ -84,6 +90,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
           prefs: {
             mutedChannels: readMutes(u.prefs?.mutedChannels),
             quietHours: { ...DEFAULT_QUIET_HOURS, ...(u.prefs?.quietHours ?? {}) },
+            digest: { ...DEFAULT_DIGEST, ...(u.prefs?.digest ?? {}) },
           },
         };
         state.users.set(user.id, user);
@@ -96,6 +103,8 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       for (const [k, v] of Object.entries(raw.reads ?? {})) state.reads.set(k, v);
       for (const [k, v] of Object.entries(raw.notifications ?? {})) state.notifications.set(k, v);
       for (const game of raw.games ?? []) state.games.set(game.id, game);
+      // Restored so a restart does not swallow messages scheduled before it.
+      for (const item of raw.scheduled ?? []) state.scheduled.set(item.id, item);
       return true;
     } catch (err) {
       console.warn(`[store] could not read ${dataFile}: ${err.message} — starting fresh`);
@@ -116,29 +125,53 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       users: [...state.users.values()].map((u) => ({
         ...u,
         channels: [...u.channels],
-        prefs: { mutedChannels: Object.fromEntries(u.prefs.mutedChannels), quietHours: u.prefs.quietHours },
+        prefs: {
+          mutedChannels: Object.fromEntries(u.prefs.mutedChannels),
+          quietHours: u.prefs.quietHours,
+          digest: u.prefs.digest,
+        },
       })),
       channels: [...state.channels.values()].map((c) => ({ ...c, members: [...c.members] })),
       conversations: [...state.conversations.values()],
       reads: Object.fromEntries(state.reads),
       notifications: Object.fromEntries(state.notifications),
       games: [...state.games.values()],
+      scheduled: [...state.scheduled.values()],
     };
   }
 
+  function writeNow() {
+    if (!dataFile) return;
+    try {
+      fs.mkdirSync(path.dirname(dataFile), { recursive: true });
+      fs.writeFileSync(dataFile, JSON.stringify(snapshot(), null, 2), { mode: 0o600 });
+      // writeFileSync only applies `mode` when creating, so re-assert it.
+      fs.chmodSync(dataFile, 0o600);
+    } catch (err) {
+      console.warn(`[store] could not write ${dataFile}: ${err.message}`);
+    }
+  }
+
+  /** Chatter can wait a quarter-second; see flush() for what cannot. */
   function save() {
     if (!dataFile) return;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        fs.mkdirSync(path.dirname(dataFile), { recursive: true });
-        fs.writeFileSync(dataFile, JSON.stringify(snapshot(), null, 2), { mode: 0o600 });
-        // writeFileSync only applies `mode` when creating, so re-assert it.
-        fs.chmodSync(dataFile, 0o600);
-      } catch (err) {
-        console.warn(`[store] could not write ${dataFile}: ${err.message}`);
-      }
-    }, 250).unref?.();
+    saveTimer = setTimeout(writeNow, 250);
+    saveTimer.unref?.();
+  }
+
+  /**
+   * Write immediately.
+   *
+   * The debounce is fine for messages — losing the last quarter-second of chat
+   * to a crash is a shrug. It is not fine for a promise to do something later:
+   * nothing else records that intent, so a scheduled message lost before the
+   * timer fires is lost silently and forever.
+   */
+  function flush() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    writeNow();
   }
 
   // ---------------------------------------------------------------------- users
@@ -156,7 +189,7 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
       name,
       createdAt: Date.now(),
       channels: new Set(),
-      prefs: { mutedChannels: new Map(), quietHours: { ...DEFAULT_QUIET_HOURS } },
+      prefs: { mutedChannels: new Map(), quietHours: { ...DEFAULT_QUIET_HOURS }, digest: { ...DEFAULT_DIGEST } },
     };
     state.users.set(user.id, user);
     state.usersByName.set(name, user.id);
@@ -516,6 +549,75 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     return user.prefs;
   }
 
+  function setDigest(userId, patch) {
+    const user = mustUser(userId);
+    user.prefs.digest = sanitizeDigest(patch, user.prefs.digest);
+    save();
+    return user.prefs.digest;
+  }
+
+  const pendingDigest = (userId) => (state.notifications.get(userId) ?? []).filter((n) => n.pending);
+
+  /** When each user's held items become old enough to be worth sending. */
+  function digestDueTimes() {
+    const times = [];
+    for (const user of state.users.values()) {
+      if (!user.prefs.digest?.enabled) continue;
+      const held = pendingDigest(user.id);
+      if (!held.length) continue;
+      // Measured from the oldest held item, so nothing waits two intervals.
+      times.push(held[0].ts + user.prefs.digest.everyMinutes * 60_000);
+    }
+    return times;
+  }
+
+  const usersDueForDigest = (now) =>
+    [...state.users.values()]
+      .filter((user) => {
+        if (!user.prefs.digest?.enabled) return false;
+        const held = pendingDigest(user.id);
+        return held.length > 0 && held[0].ts + user.prefs.digest.everyMinutes * 60_000 <= now;
+      })
+      .map((user) => user.id);
+
+  /**
+   * Replace every held entry with one summary. Returns null when there was
+   * nothing held, so callers can skip an empty digest.
+   */
+  function flushDigest(userId, now = Date.now(), { alert = true, silencedByQuietHours = false } = {}) {
+    const list = state.notifications.get(userId) ?? [];
+    const held = list.filter((n) => n.pending);
+    if (!held.length) return null;
+
+    state.notifications.set(userId, list.filter((n) => !n.pending));
+    const digest = addNotification(userId, {
+      id: id('n'),
+      kind: 'digest',
+      conversationId: null,
+      messageId: null,
+      scope: 'digest',
+      from: { id: null, name: 'digest' },
+      channel: null,
+      preview: `${held.length} ${held.length === 1 ? 'mention' : 'mentions'} while you were away`,
+      items: held.map((n) => ({
+        conversationId: n.conversationId,
+        from: n.from,
+        channel: n.channel,
+        preview: n.preview,
+        ts: n.ts,
+      })),
+      ts: now,
+      read: false,
+      alert,
+      bypassedMute: held.some((n) => n.bypassedMute),
+      silencedByQuietHours,
+      reason: silencedByQuietHours
+        ? 'Your digest — silenced by quiet hours'
+        : 'Your digest — everything held since the last one',
+    });
+    return digest;
+  }
+
   function setQuietHours(userId, patch) {
     const user = mustUser(userId);
     user.prefs.quietHours = sanitizeQuietHours(patch, user.prefs.quietHours);
@@ -532,7 +634,9 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     return notification;
   }
 
-  const listNotifications = (userId) => [...(state.notifications.get(userId) ?? [])].reverse();
+  /** Held-for-digest entries are deliberately invisible until the digest fires. */
+  const listNotifications = (userId) =>
+    [...(state.notifications.get(userId) ?? [])].filter((n) => !n.pending).reverse();
 
   /**
    * "Your move" should not stack. Drop any unread notice still pointing at this
@@ -630,6 +734,83 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     return game;
   }
 
+  // -------------------------------------------------------- scheduled sends
+
+  /**
+   * A scheduled message is *not* a message. Nothing is appended, so it has no
+   * seq, takes part in no history, and counts towards nobody's unread until
+   * the moment it is actually sent.
+   */
+  function scheduleMessage({ authorId, kind, channelId = null, toId = null, text, deliverAt }) {
+    mustUser(authorId);
+    const when = Number(deliverAt);
+    if (!Number.isFinite(when)) throw httpError(400, 'deliverAt must be a timestamp in milliseconds.');
+    if (when <= Date.now()) throw httpError(400, 'Pick a time in the future.');
+    if (when > Date.now() + MAX_SCHEDULE_AHEAD_MS) throw httpError(400, 'Schedule at most a year ahead.');
+
+    // Fail loudly now rather than silently at delivery.
+    const body = cleanText(text);
+    if (kind === 'channel') {
+      const channel = mustChannel(channelId);
+      if (!channel.members.has(authorId)) throw httpError(403, `Join #${channel.name} before posting.`);
+    } else {
+      mustUser(toId);
+    }
+
+    const item = {
+      id: id('s'),
+      authorId, kind, channelId, toId,
+      text: body,
+      deliverAt: when,
+      createdAt: Date.now(),
+      status: 'pending',
+      error: null,
+    };
+    state.scheduled.set(item.id, item);
+    flush();
+    return item;
+  }
+
+  const pendingScheduled = () =>
+    [...state.scheduled.values()].filter((item) => item.status === 'pending');
+
+  /** The soonest moment anything needs doing, or null when nothing does. */
+  function nextDueAt() {
+    const times = [...pendingScheduled().map((item) => item.deliverAt), ...digestDueTimes()];
+    return times.length ? Math.min(...times) : null;
+  }
+
+  const dueScheduled = (now) =>
+    pendingScheduled().filter((item) => item.deliverAt <= now).sort((a, b) => a.deliverAt - b.deliverAt);
+
+  /** Sent messages are their own record; only failures are worth keeping. */
+  function completeScheduled(itemId) {
+    state.scheduled.delete(itemId);
+    flush();
+  }
+
+  function failScheduled(itemId, reason) {
+    const item = state.scheduled.get(itemId);
+    if (!item) return;
+    item.status = 'failed';
+    item.error = String(reason).slice(0, 200);
+    flush();
+  }
+
+  const listScheduled = (authorId) =>
+    [...state.scheduled.values()]
+      .filter((item) => item.authorId === authorId)
+      .sort((a, b) => a.deliverAt - b.deliverAt);
+
+  function cancelScheduled(itemId, authorId) {
+    const item = state.scheduled.get(itemId);
+    if (!item) throw httpError(404, 'No such scheduled message.');
+    if (item.authorId !== authorId) throw httpError(403, 'That is not yours to cancel.');
+    state.scheduled.delete(itemId);
+    flush();
+    return item;
+  }
+
   // ----------------------------------------------------------------- presence
 
   function setOnline(userId, delta) {
@@ -678,12 +859,16 @@ export function createStore({ dataFile = null, seedDemo = true } = {}) {
     dmConversationId, ensureDmConversation, listDmThreads,
     postChannelMessage, postDirectMessage, history,
     unreadFor, markRead,
-    setChannelMute, setQuietHours,
+    setChannelMute, setQuietHours, setDigest,
+    pendingDigest, usersDueForDigest, flushDigest,
     addNotification, listNotifications, markNotificationsRead, replaceGameNotification,
     createGame, createRpsGame, getGame, listGamesIn, activeGameIn, saveGame,
+    scheduleMessage, listScheduled, cancelScheduled,
+    nextDueAt, dueScheduled, completeScheduled, failScheduled,
     setOnline, isOnline,
     newId: id,
     save,
+    flush,
   };
 }
 

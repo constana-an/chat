@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { createApp } from '../server/index.js';
 import { formatClock } from '../server/notifications.js';
 import { parseSquare } from '../server/chess.js';
@@ -9,7 +13,7 @@ import { parseSquare } from '../server/chess.js';
 const PASSWORD = 'correct-horse-battery';
 
 async function withServer(run, { seedDemo = false } = {}) {
-  const { server, store } = createApp({ dataFile: null, seedDemo });
+  const { server, store, scheduler, router } = createApp({ dataFile: null, seedDemo });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -68,8 +72,9 @@ async function withServer(run, { seedDemo = false } = {}) {
   };
 
   try {
-    await run({ base, signIn, call, openStream, store });
+    await run({ base, signIn, call, openStream, store, scheduler, router });
   } finally {
+    scheduler.stop();
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
@@ -1045,5 +1050,306 @@ test('a snooze cannot quietly become a permanent mute', async () => {
     assert.match(tooLong.error, /between 1 and \d+ minutes/);
 
     assert.equal((await channelOf(grace, channel.id)).muted, false, 'and none of them muted anything');
+  });
+});
+
+// ─────────────────────── scheduled messages (change 2) ──────────────────
+
+const soon = (ms = 40) => Date.now() + ms;
+
+/** Let the due time pass, then force a pass so the test does not race a timer. */
+async function runScheduler(scheduler, waitMs = 80) {
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
+  await scheduler.tick();
+}
+
+test('scheduling writes no message: no history, no unread, no mention', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+
+    const queued = await ada.call('POST', `/api/channels/${channel.id}/messages`,
+      { text: 'heads up @grace', deliverAt: Date.now() + 60_000 });
+    assert.equal(queued.status, 200);
+    assert.equal(queued.scheduled.status, 'pending');
+    assert.equal(queued.message, undefined, 'nothing was posted');
+
+    // The requirement in one assertion block: none of this moves yet.
+    assert.equal((await grace.call('GET', `/api/channels/${channel.id}/messages`)).messages.length, 0);
+    assert.equal((await channelOf(grace, channel.id)).unread, 0);
+    assert.equal((await channelOf(grace, channel.id)).mentions, 0);
+    assert.equal((await notificationsOf(grace)).length, 0);
+
+    // Only the author knows it exists.
+    assert.equal((await ada.call('GET', '/api/scheduled')).scheduled.length, 1);
+    assert.equal((await grace.call('GET', '/api/scheduled')).scheduled.length, 0);
+  });
+});
+
+test('at delivery it becomes an ordinary message — mentions and unread land then', async () => {
+  await withServer(async ({ signIn, scheduler }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+
+    await ada.call('POST', `/api/channels/${channel.id}/messages`,
+      { text: 'heads up @grace', deliverAt: soon() });
+    await runScheduler(scheduler);
+
+    const history = (await grace.call('GET', `/api/channels/${channel.id}/messages`)).messages;
+    assert.equal(history.length, 1);
+    assert.equal(history[0].text, 'heads up @grace');
+    assert.equal(history[0].authorName, 'ada');
+
+    const view = await channelOf(grace, channel.id);
+    assert.equal(view.unread, 1, 'unread starts now, not at compose time');
+    assert.equal(view.mentions, 1, 'and so does the mention');
+
+    const [notification] = await notificationsOf(grace);
+    assert.equal(notification.kind, 'mention');
+    assert.equal(notification.alert, true);
+
+    assert.equal((await ada.call('GET', '/api/scheduled')).scheduled.length, 0, 'the queue is cleared');
+  });
+});
+
+test('a scheduled roll is rolled when it is sent, not when it is written', async () => {
+  await withServer(async ({ signIn, scheduler }) => {
+    const { ada, channel } = await twoUsersInAChannel(signIn);
+    await ada.call('POST', `/api/channels/${channel.id}/messages`,
+      { text: '/roll 2d6', deliverAt: soon() });
+    await runScheduler(scheduler);
+
+    const [message] = (await ada.call('GET', `/api/channels/${channel.id}/messages`)).messages;
+    assert.equal(message.kind, 'roll', 'the whole write was deferred, so the dice fell late');
+    assert.equal(message.roll.values.length, 2);
+  });
+});
+
+test('scheduled direct messages work the same way', async () => {
+  await withServer(async ({ signIn, scheduler }) => {
+    const ada = await signIn('ada');
+    const grace = await signIn('grace');
+
+    await ada.call('POST', `/api/dms/${grace.user.id}/messages`,
+      { text: 'morning', deliverAt: soon() });
+    assert.equal((await grace.call('GET', `/api/dms/${ada.user.id}/messages`)).messages.length, 0);
+
+    await runScheduler(scheduler);
+    const conversation = await grace.call('GET', `/api/dms/${ada.user.id}/messages`);
+    assert.equal(conversation.messages.length, 1);
+    assert.equal(conversation.unread, 1);
+    assert.equal((await notificationsOf(grace))[0].kind, 'direct');
+  });
+});
+
+test('the author can list and cancel; nobody else can', async () => {
+  await withServer(async ({ signIn, scheduler }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    const { scheduled } = await ada.call('POST', `/api/channels/${channel.id}/messages`,
+      { text: 'never mind', deliverAt: soon(120) });
+
+    assert.equal((await grace.call('DELETE', `/api/scheduled/${scheduled.id}`)).status, 403);
+    assert.equal((await ada.call('DELETE', `/api/scheduled/${scheduled.id}`)).cancelled, scheduled.id);
+    assert.equal((await ada.call('GET', '/api/scheduled')).scheduled.length, 0);
+
+    await runScheduler(scheduler, 160);
+    assert.equal((await ada.call('GET', `/api/channels/${channel.id}/messages`)).messages.length, 0,
+      'a cancelled message never arrives');
+  });
+});
+
+test('impossible schedules are refused up front, not silently at delivery', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    const path = `/api/channels/${channel.id}/messages`;
+
+    assert.equal((await ada.call('POST', path, { text: 'x', deliverAt: Date.now() - 1000 })).status, 400);
+    assert.equal((await ada.call('POST', path, { text: 'x', deliverAt: 'tomorrow' })).status, 400);
+    assert.match((await ada.call('POST', path,
+      { text: 'x', deliverAt: Date.now() + 400 * 24 * 3600_000 })).error, /at most a year/);
+    assert.equal((await ada.call('POST', path, { text: '   ', deliverAt: soon(9999) })).status, 400,
+      'an empty message fails now rather than at 3am');
+
+    // Someone who is not a member cannot queue into the channel either.
+    await grace.call('POST', `/api/channels/${channel.id}/leave`);
+    assert.equal((await grace.call('POST', path, { text: 'x', deliverAt: soon(9999) })).status, 403);
+  });
+});
+
+test('a send that becomes impossible is recorded, not lost in silence', async () => {
+  await withServer(async ({ signIn, scheduler }) => {
+    const { ada, channel } = await twoUsersInAChannel(signIn);
+    await ada.call('POST', `/api/channels/${channel.id}/messages`,
+      { text: 'still here?', deliverAt: soon() });
+
+    // The world changes between writing and sending.
+    await ada.call('POST', `/api/channels/${channel.id}/leave`);
+    await runScheduler(scheduler);
+
+    const [item] = (await ada.call('GET', '/api/scheduled')).scheduled;
+    assert.equal(item.status, 'failed');
+    assert.match(item.error, /Join #/);
+    assert.equal((await ada.call('GET', `/api/channels/${channel.id}/messages`)).messages.length, 0);
+  });
+});
+
+test('a message scheduled before a restart still arrives after it', async () => {
+  const dataFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'teamchat-')), 'db.json');
+
+  /** Boot an app on the shared data file and hand back a signed-in client. */
+  const boot = async () => {
+    const app = createApp({ dataFile, seedDemo: false });
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    const call = async (token, method, p, body) => {
+      const res = await fetch(base + p, {
+        method,
+        headers: { ...(body ? { 'Content-Type': 'application/json' } : {}),
+                   ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: res.status, ...(await res.json().catch(() => ({}))) };
+    };
+    const signIn = async (username) => {
+      const { token } = await call(null, 'POST', '/api/session', { username, password: PASSWORD });
+      return { token, call: (m, p, b) => call(token, m, p, b) };
+    };
+    const close = async () => {
+      app.scheduler.stop();
+      app.server.closeAllConnections?.();
+      await new Promise((resolve) => app.server.close(resolve));
+    };
+    return { ...app, signIn, close };
+  };
+
+  let channelId;
+  const first = await boot();
+  try {
+    const ada = await first.signIn('ada');
+    const { channel } = await ada.call('POST', '/api/channels', { name: 'general' });
+    channelId = channel.id;
+    // Far enough out that it cannot possibly fire before we pull the plug.
+    const { scheduled } = await ada.call('POST', `/api/channels/${channelId}/messages`,
+      { text: 'sent across a restart', deliverAt: Date.now() + 250 });
+    assert.equal(scheduled.status, 'pending');
+  } finally {
+    await first.close();
+  }
+
+  // Everything in memory is gone; only db.json survives.
+  const second = await boot();
+  try {
+    const ada = await second.signIn('ada');
+    assert.equal((await ada.call('GET', '/api/scheduled')).scheduled.length, 1,
+      'the new process restored it from disk');
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await second.scheduler.tick();
+
+    const history = (await ada.call('GET', `/api/channels/${channelId}/messages`)).messages;
+    assert.equal(history.length, 1, 'and delivered it');
+    assert.equal(history[0].text, 'sent across a restart');
+    assert.equal((await ada.call('GET', '/api/scheduled')).scheduled.length, 0);
+  } finally {
+    await second.close();
+    fs.rmSync(path.dirname(dataFile), { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────── digest (change 3) ──────────────────────
+
+/** A real timestamp past the interval — Infinity is not a valid Date. */
+const afterInterval = (minutes = 5) => Date.now() + (minutes + 1) * 60_000;
+
+test('with a digest on, mentions are held and DMs are not', async () => {
+  await withServer(async ({ signIn, router }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    await grace.call('PATCH', '/api/settings/digest', { enabled: true, everyMinutes: 5 });
+
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'one @grace' });
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'two @grace' });
+
+    assert.equal((await notificationsOf(grace)).length, 0, 'the inbox stays quiet');
+    assert.equal((await channelOf(grace, channel.id)).mentions, 2, 'but they still count');
+    assert.equal((await channelOf(grace, channel.id)).unread, 2);
+
+    // A direct message refuses to wait.
+    await ada.call('POST', `/api/dms/${grace.user.id}/messages`, { text: 'this one is urgent' });
+    const inbox = await notificationsOf(grace);
+    assert.equal(inbox.length, 1);
+    assert.equal(inbox[0].kind, 'direct');
+    assert.equal(inbox[0].alert, true);
+
+    // When the interval passes, two mentions become one entry.
+    router.flushDigests(afterInterval());
+    const after = await notificationsOf(grace);
+    const digest = after.find((n) => n.kind === 'digest');
+    assert.ok(digest, 'the digest arrived');
+    assert.equal(digest.items.length, 2);
+    assert.match(digest.preview, /2 mentions/);
+    assert.equal(digest.alert, true);
+    assert.deepEqual(digest.items.map((i) => i.preview), ['one @grace', 'two @grace']);
+    assert.equal(after.filter((n) => n.kind === 'mention').length, 0, 'and replaced them, not joined them');
+  });
+});
+
+test('a digest that lands inside quiet hours is silenced as one thing', async () => {
+  await withServer(async ({ signIn, router }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    await grace.call('PATCH', '/api/settings/digest', { enabled: true, everyMinutes: 5 });
+    await grace.call('PATCH', '/api/settings/quiet-hours', { enabled: true, ...quietWindowAroundNow() });
+
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'held @grace' });
+    router.flushDigests(afterInterval());
+
+    const digest = (await notificationsOf(grace)).find((n) => n.kind === 'digest');
+    assert.ok(digest);
+    assert.equal(digest.alert, false, 'quiet hours applies to the digest, not to each held item');
+    assert.equal(digest.silencedByQuietHours, true);
+    assert.match(digest.reason, /silenced by quiet hours/);
+  });
+});
+
+test('turning the digest off releases what it was holding', async () => {
+  await withServer(async ({ signIn }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    await grace.call('PATCH', '/api/settings/digest', { enabled: true });
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'stuck @grace' });
+    assert.equal((await notificationsOf(grace)).length, 0);
+
+    const off = await grace.call('PATCH', '/api/settings/digest', { enabled: false });
+    assert.equal(off.digest.enabled, false);
+    assert.equal(off.held, 0, 'nothing is left holding');
+
+    const released = await notificationsOf(grace);
+    assert.equal(released.length, 1, 'it was not stranded');
+    assert.equal(released[0].kind, 'digest');
+
+    // And from now on mentions come through immediately again.
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'again @grace' });
+    assert.ok((await notificationsOf(grace)).some((n) => n.kind === 'mention'));
+  });
+});
+
+test('an empty digest is never sent', async () => {
+  await withServer(async ({ signIn, router }) => {
+    const { grace } = await twoUsersInAChannel(signIn);
+    await grace.call('PATCH', '/api/settings/digest', { enabled: true });
+    router.flushDigests(afterInterval());
+    assert.equal((await notificationsOf(grace)).length, 0);
+  });
+});
+
+test('held items are not pushed over the event stream either', async () => {
+  await withServer(async ({ signIn, openStream }) => {
+    const { ada, grace, channel } = await twoUsersInAChannel(signIn);
+    await grace.call('PATCH', '/api/settings/digest', { enabled: true });
+
+    const spy = await openStream(grace.token);
+    await waitFor(spy, 'hello');
+    await ada.call('POST', `/api/channels/${channel.id}/messages`, { text: 'quiet please @grace' });
+    await waitFor(spy, 'message');   // she still sees the message and the unread count
+
+    assert.equal(spy.events.some((e) => e.type === 'notification'), false,
+      'but nothing was pushed that would light up the bell');
+    spy.close();
   });
 });

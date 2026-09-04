@@ -15,6 +15,7 @@ const state = {
   dms: new Map(),              // otherUserId -> thread view
   messages: new Map(),         // conversationId -> message[]
   notifications: [],
+  scheduled: [],             // 我写好但还没发出去的消息
   current: null,               // {kind:'channel'|'dm', id, conversationId}
   game: null,                  // 当前私信里的棋局视图
   rps: null,                   // 当前私信里的石头剪刀布视图
@@ -126,6 +127,7 @@ async function refreshState() {
   state.channels = new Map(data.channels.map((c) => [c.id, c]));
   state.dms = new Map(data.dms.map((t) => [t.userId, t]));
   state.notifications = data.notifications;
+  state.scheduled = data.scheduled ?? [];
   renderAll();
 }
 
@@ -188,6 +190,7 @@ function onEvent(type, data) {
     case 'notifications:read': return onNotificationsRead(data);
     case 'prefs': return onPrefs(data);
     case 'presence': return onPresence(data);
+    case 'scheduled': return onScheduled(data.scheduled);
     case 'game': return onGame(data.game);
     case 'user:joined': return onUserJoined(data.user);
     case 'channel:created': return onChannelCreated(data.channel);
@@ -259,9 +262,10 @@ function onNotificationsRead({ ids }) {
   renderBadge();
 }
 
-function onPrefs({ channels, quietHours }) {
+function onPrefs({ channels, quietHours, digest }) {
   if (channels) state.channels = new Map(channels.map((c) => [c.id, c]));
   if (quietHours) state.me.prefs.quietHours = quietHours;
+  if (digest) state.me.prefs.digest = digest;
   renderAll();
 }
 
@@ -422,6 +426,7 @@ function renderList(container, items, build, emptyText) {
 function renderConversation() {
   renderHeader();
   renderMessages();
+  renderScheduled();
   const hasConversation = Boolean(state.current);
   $('composer-input').disabled = !hasConversation;
   $('composer-send').disabled = !hasConversation;
@@ -759,16 +764,94 @@ async function send() {
   closeMentionPopup();
   state.markers.set(state.current.conversationId, 0); // clear the "new" line once you reply
 
+  const deliverAt = plannedTime();
+  const path = state.current.kind === 'channel'
+    ? `/api/channels/${state.current.id}/messages`
+    : `/api/dms/${state.current.id}/messages`;
+
   try {
-    if (state.current.kind === 'channel') {
-      await api('POST', `/api/channels/${state.current.id}/messages`, { text });
-    } else {
-      await api('POST', `/api/dms/${state.current.id}/messages`, { text });
+    const result = await api('POST', path, deliverAt ? { text, deliverAt } : { text });
+    if (result.scheduled) {
+      state.scheduled = [...state.scheduled, result.scheduled];
+      clearPlannedTime();
+      renderScheduled();
+      flashHint(`Queued for ${whenLabel(result.scheduled.deliverAt)}.`);
     }
     scrollToBottom();
   } catch (err) {
     input.value = text;
     flashHint(err.message);
+  }
+}
+
+// ──────────────────────  send later (change 2)  ─────────────────────────
+
+/** The chosen delivery time in ms, or null for "send it now". */
+function plannedTime() {
+  if ($('later-row').hidden) return null;
+  const value = $('later-at').value;
+  if (!value) return null;
+  const at = new Date(value).getTime();
+  return Number.isFinite(at) ? at : null;
+}
+
+function clearPlannedTime() {
+  $('later-row').hidden = true;
+  $('later-at').value = '';
+  $('btn-later').classList.remove('on');
+}
+
+$('btn-later').addEventListener('click', () => {
+  const row = $('later-row');
+  if (!row.hidden) return clearPlannedTime();
+  row.hidden = false;
+  $('btn-later').classList.add('on');
+  // Default to an hour out, in the local time the input expects.
+  const soon = new Date(Date.now() + 60 * 60_000 - new Date().getTimezoneOffset() * 60_000);
+  $('later-at').value = soon.toISOString().slice(0, 16);
+  $('later-at').focus();
+});
+$('later-clear').addEventListener('click', clearPlannedTime);
+
+function whenLabel(at) {
+  const date = new Date(at);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return sameDay ? time : `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+}
+
+function onScheduled(list) {
+  state.scheduled = list;
+  renderScheduled();
+}
+
+/** Only the queue for the conversation you are looking at. */
+function renderScheduled() {
+  const box = $('scheduled-list');
+  box.replaceChildren();
+  if (!state.current) return;
+
+  const mine = state.scheduled.filter((item) => item.kind === 'channel'
+    ? state.current.kind === 'channel' && item.channelId === state.current.id
+    : state.current.kind === 'dm' && item.toId === state.current.id);
+
+  for (const item of mine) {
+    const row = el('div', `scheduled-item${item.status === 'failed' ? ' failed' : ''}`);
+    row.append(el('span', 'when', item.status === 'failed' ? 'failed' : whenLabel(item.deliverAt)));
+    row.append(el('span', 'body', item.text));
+    if (item.error) row.append(el('span', 'why', item.error));
+
+    const drop = el('button', 'chip', item.status === 'failed' ? 'Dismiss' : 'Cancel');
+    drop.type = 'button';
+    drop.onclick = async () => {
+      try {
+        await api('DELETE', `/api/scheduled/${item.id}`);
+        state.scheduled = state.scheduled.filter((other) => other.id !== item.id);
+        renderScheduled();
+      } catch (err) { flashHint(err.message); }
+    };
+    row.append(drop);
+    box.append(row);
   }
 }
 
@@ -867,9 +950,21 @@ function renderInbox() {
 
     item.append(el('div', 'preview', notification.preview));
 
+    if (notification.kind === 'digest' && notification.items?.length) {
+      const items = el('div', 'digest-items');
+      for (const entry of notification.items) {
+        const row = el('div', 'digest-item');
+        row.append(el('span', 'who', `@${entry.from.name}`));
+        row.append(el('span', 'what', `${entry.channel ? `#${entry.channel.name} · ` : ''}${entry.preview}`));
+        items.append(row);
+      }
+      item.append(items);
+    }
+
     const why = el('div', 'why');
-    why.append(el('span', `tag ${notification.kind === 'direct' ? 'dm' : 'mention'}`,
-      notification.kind === 'direct' ? 'DM' : 'Mention'));
+    const tagFor = { direct: ['dm', 'DM'], mention: ['mention', 'Mention'], digest: ['digest', 'Digest'] };
+    const [tagClass, tagText] = tagFor[notification.kind] ?? ['mention', 'Mention'];
+    why.append(el('span', `tag ${tagClass}`, tagText));
     if (notification.bypassedMute) why.append(el('span', 'tag bypass', 'Bypassed mute'));
     if (notification.silencedByQuietHours) why.append(el('span', 'tag quiet', 'Quiet hours'));
     why.append(el('span', null, notification.reason));
@@ -877,8 +972,10 @@ function renderInbox() {
 
     item.onclick = () => {
       closePanels();
-      if (notification.channel) openChannel(notification.channel.id);
-      else openDm(notification.from.id);
+      const target = notification.kind === 'digest' ? notification.items?.[0] : notification;
+      if (!target) return;
+      if (target.channel) openChannel(target.channel.id);
+      else if (target.from?.id) openDm(target.from.id);
     };
     list.append(item);
   }
@@ -912,6 +1009,14 @@ function renderSettings() {
     status.textContent = `Scheduled ${qh.start}–${qh.end}. Not active right now.`;
     status.classList.remove('active');
   }
+
+  const digest = state.me.prefs.digest ?? { enabled: false, everyMinutes: 60 };
+  $('digest-enabled').checked = digest.enabled;
+  $('digest-every').value = digest.everyMinutes;
+  $('digest-every').disabled = !digest.enabled;
+  $('digest-status').textContent = digest.enabled
+    ? `Mentions are held and delivered together every ${digest.everyMinutes} minutes. Direct messages still come straight through.`
+    : 'Off — every mention notifies you as it happens.';
 
   const list = $('mute-list');
   list.replaceChildren();
@@ -963,6 +1068,21 @@ async function saveQuietHours() {
 
 for (const id of ['qh-enabled', 'qh-start', 'qh-end', 'qh-allow-direct']) {
   $(id).addEventListener('change', saveQuietHours);
+}
+
+async function saveDigest() {
+  const { digest } = await api('PATCH', '/api/settings/digest', {
+    enabled: $('digest-enabled').checked,
+    everyMinutes: Number($('digest-every').value) || 60,
+  });
+  state.me.prefs.digest = digest;
+  renderSettings();
+  renderInbox();
+  renderBadge();
+}
+
+for (const id of ['digest-enabled', 'digest-every']) {
+  $(id).addEventListener('change', saveDigest);
 }
 
 // ─────────────────────────  panels, dialogs, toasts  ─────────────────────

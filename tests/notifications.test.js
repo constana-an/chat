@@ -9,6 +9,7 @@ import {
   parseMentions,
   isChannelMuted,
   mutedUntil,
+  sanitizeDigest,
   routeMessage,
   sanitizeQuietHours,
 } from '../server/notifications.js';
@@ -225,4 +226,58 @@ test('a snooze changes nothing about what a mute means', () => {
   // An hour later the channel is simply not muted any more.
   const later = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: [], now: at(noon + 3700_000) });
   assert.equal(later.channelMuted, false);
+});
+
+// ───────────────────────────────── digest (change 3) ─────────────────────
+
+const withDigest = (extra = {}) => ({
+  id: 'u_ada',
+  prefs: { mutedChannels: new Map(), quietHours: { ...DEFAULT_QUIET_HOURS }, digest: { enabled: true, everyMinutes: 60 }, ...extra },
+});
+
+test('a digest holds mentions but never a direct message', () => {
+  const user = withDigest();
+
+  const mention = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: ['u_ada'] });
+  assert.equal(mention.inbox, true, 'it is still going to reach them');
+  assert.equal(mention.delivery, 'digest');
+  assert.equal(mention.batched, true);
+  assert.equal(mention.alert, false, 'but it does not interrupt on its own');
+  assert.match(mention.reason, /held for your digest/);
+
+  const dm = routeMessage({ scope: 'direct', recipient: user, mentions: ['u_ada'] });
+  assert.equal(dm.delivery, 'immediate', 'a direct message is never batched');
+  assert.equal(dm.alert, true);
+});
+
+test('with the digest off nothing changes at all', () => {
+  const user = { id: 'u_ada', prefs: { mutedChannels: new Map(), quietHours: { ...DEFAULT_QUIET_HOURS } } };
+  const mention = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: ['u_ada'] });
+  assert.equal(mention.delivery, 'immediate');
+  assert.equal(mention.batched, false);
+  assert.equal(mention.alert, true);
+});
+
+test('a held mention still counts unread, and still ignores a mute', () => {
+  const user = withDigest({ mutedChannels: new Map([['ch_1', null]]) });
+  const held = routeMessage({ scope: 'channel', recipient: user, channelId: 'ch_1', mentions: ['u_ada'] });
+
+  assert.equal(held.countsAsUnread, true, 'batching is about noise, not about hiding');
+  assert.equal(held.bypassedMute, true, 'the mute is still powerless');
+  assert.equal(held.delivery, 'digest');
+});
+
+test('ordinary channel activity is not something a digest can collect', () => {
+  const activity = routeMessage({ scope: 'channel', recipient: withDigest(), channelId: 'ch_1', mentions: [] });
+  assert.equal(activity.inbox, false);
+  assert.equal(activity.delivery, 'none', 'it was never going to the inbox, digest or not');
+});
+
+test('sanitizeDigest refuses intervals that make a digest pointless', () => {
+  assert.equal(sanitizeDigest({ enabled: true }).enabled, true);
+  assert.equal(sanitizeDigest({ everyMinutes: 30 }).everyMinutes, 30);
+  assert.equal(sanitizeDigest({ everyMinutes: 1 }).everyMinutes, 60, 'a one-minute digest is just a slow alert');
+  assert.equal(sanitizeDigest({ everyMinutes: 5000 }).everyMinutes, 60);
+  assert.equal(sanitizeDigest({ everyMinutes: 'hourly' }).everyMinutes, 60);
+  assert.equal(sanitizeDigest(null).enabled, false);
 });

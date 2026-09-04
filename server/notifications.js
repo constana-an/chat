@@ -53,6 +53,9 @@ export function formatClock(minutes) {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
+/** Off by default: batching mentions is a choice, not the house style. */
+export const DEFAULT_DIGEST = Object.freeze({ enabled: false, everyMinutes: 60 });
+
 export const DEFAULT_QUIET_HOURS = Object.freeze({
   enabled: false,
   start: '22:00',
@@ -113,28 +116,38 @@ export function routeMessage({ scope, recipient, mentions = [], channelId, now =
   // DMs and mentions always do; ordinary channel chatter never does.
   const inbox = kind !== 'activity';
 
-  // Stage 2 -- quiet hours can downgrade an alert to a silent inbox entry.
+  // Stage 2 -- when. A direct message is never batched; that is the whole
+  // point of it being direct. Everything else the user asked to batch waits
+  // for the digest instead of interrupting one mention at a time.
+  const digestOn = recipient.prefs?.digest?.enabled === true;
+  const batched = inbox && kind !== 'direct' && digestOn;
+
+  // Stage 3 -- how loud. Quiet hours can downgrade an alert to a silent inbox
+  // entry. A batched item has no alert of its own; the digest carries one.
   const quietHoursActive = isQuietHoursActive(recipient.prefs?.quietHours, now);
   const allowDirect = recipient.prefs?.quietHours?.allowDirect === true;
   const ringsThroughQuietHours = kind === 'direct' && allowDirect;
-  const silencedByQuietHours = inbox && quietHoursActive && !ringsThroughQuietHours;
+  const silencedByQuietHours = inbox && !batched && quietHoursActive && !ringsThroughQuietHours;
 
   return {
     userId: recipient.id,
     // Muting never hides activity from the unread count.
     countsAsUnread: true,
     kind,
-    alert: inbox && !silencedByQuietHours,
+    alert: inbox && !batched && !silencedByQuietHours,
     inbox,
+    /** 'none' | 'immediate' | 'digest' — when this reaches the person. */
+    delivery: !inbox ? 'none' : batched ? 'digest' : 'immediate',
+    batched,
     channelMuted: muted,
     bypassedMute: inbox && muted,
     quietHoursActive,
     silencedByQuietHours,
-    reason: explain({ kind, muted, silencedByQuietHours, quietHoursActive, ringsThroughQuietHours }),
+    reason: explain({ kind, muted, batched, silencedByQuietHours, quietHoursActive, ringsThroughQuietHours }),
   };
 }
 
-function explain({ kind, muted, silencedByQuietHours, quietHoursActive, ringsThroughQuietHours }) {
+function explain({ kind, muted, batched, silencedByQuietHours, quietHoursActive, ringsThroughQuietHours }) {
   if (kind === 'activity') {
     return muted ? 'Channel activity in a muted channel — unread count only'
                  : 'Channel activity — unread count only';
@@ -142,6 +155,7 @@ function explain({ kind, muted, silencedByQuietHours, quietHoursActive, ringsThr
   const what = kind === 'direct' ? 'Direct message' : 'You were mentioned';
   const parts = [what];
   if (muted) parts.push('delivered despite the channel mute');
+  if (batched) parts.push('held for your digest');
   if (silencedByQuietHours) parts.push('silenced by quiet hours');
   else if (quietHoursActive && ringsThroughQuietHours) parts.push('allowed through quiet hours');
   return parts.join(' — ');
@@ -186,6 +200,19 @@ export function sanitizeQuietHours(patch, current = DEFAULT_QUIET_HOURS) {
   if ('tzOffsetMinutes' in patch && Number.isFinite(Number(patch.tzOffsetMinutes))) {
     const offset = Math.trunc(Number(patch.tzOffsetMinutes));
     if (offset >= -900 && offset <= 900) next.tzOffsetMinutes = offset;
+  }
+  return next;
+}
+
+/** Normalise a digest patch coming from the client. */
+export function sanitizeDigest(patch, current = DEFAULT_DIGEST) {
+  const next = { ...DEFAULT_DIGEST, ...current };
+  if (patch == null || typeof patch !== 'object') return next;
+  if ('enabled' in patch) next.enabled = Boolean(patch.enabled);
+  if ('everyMinutes' in patch) {
+    const every = Math.trunc(Number(patch.everyMinutes));
+    // Below a few minutes a "digest" is just a slow notification.
+    if (Number.isFinite(every) && every >= 5 && every <= 24 * 60) next.everyMinutes = every;
   }
   return next;
 }

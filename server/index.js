@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { createStore } from './store.js';
 import { createHub } from './hub.js';
 import { createRouter } from './routes.js';
+import { createScheduler } from './scheduler.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -33,6 +34,16 @@ export function createApp({ dataFile = null, seedDemo = true } = {}) {
   const hub = createHub();
   const router = createRouter({ store, hub });
 
+  const scheduler = createScheduler({
+    store,
+    onDue: router.deliverScheduled,
+    onSweep: router.flushDigests,
+  });
+  router.useScheduler(scheduler);
+  // Started here, after the store has loaded, so a restart picks up anything
+  // that was scheduled before it.
+  scheduler.start();
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
 
@@ -47,7 +58,7 @@ export function createApp({ dataFile = null, seedDemo = true } = {}) {
     }
   });
 
-  return { server, store, hub };
+  return { server, store, hub, scheduler, router };
 }
 
 async function handleApi({ req, res, url, store, router }) {
@@ -138,6 +149,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT ?? 3000);
   const dataFile = process.env.CHAT_DATA_FILE ?? path.join(ROOT, 'data', 'db.json');
   const { server, store } = createApp({ dataFile });
+
+  // Anything still sitting in the save debounce would be lost on exit.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      store.flush();
+      server.close(() => process.exit(0));
+    });
+  }
+
   server.listen(port, () => {
     console.log(`team-chat listening on http://localhost:${port}`);
     console.log(`persisting to ${dataFile} (mode 0600 — it holds password hashes)`);

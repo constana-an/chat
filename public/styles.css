@@ -569,3 +569,52 @@ dialog menu button:not(.primary) {
 }
 .snooze-btn:hover { color: var(--text); border-color: var(--accent); }
 .snooze-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ───────────────────  scheduled messages  ──────────────────────────── */
+.later-btn {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font-size: 15px; padding: 5px 7px; border-radius: 7px; flex: none;
+}
+.later-btn:hover { background: var(--panel-3); color: var(--text); }
+.later-btn.on { color: var(--accent); background: var(--accent-soft); }
+.later-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.later-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 8px; padding: 8px 12px;
+  background: var(--panel-2); border: 1px solid var(--accent); border-radius: 10px;
+  font-size: 13px; color: var(--dim);
+}
+.later-row input {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 5px 8px; outline: none; color-scheme: dark;
+}
+.later-row input:focus { border-color: var(--accent); }
+
+.scheduled-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.scheduled-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; border-radius: 9px;
+  background: var(--panel-2); border: 1px dashed var(--line);
+  font-size: 13px; color: var(--dim);
+}
+.scheduled-item.failed { border-color: var(--red); border-style: solid; }
+.scheduled-item .when { font-family: var(--mono); font-size: 11.5px; color: var(--accent); flex: none; }
+.scheduled-item.failed .when { color: var(--red); }
+.scheduled-item .body { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.scheduled-item .why { font-size: 11px; color: var(--red); }
+
+.setting input[type="number"] {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 5px 8px; width: 72px; outline: none;
+}
+.setting input[type="number"]:focus { border-color: var(--accent); }
+
+.notif .digest-items { margin-top: 7px; display: flex; flex-direction: column; gap: 4px; }
+.notif .digest-item {
+  display: flex; gap: 7px; font-size: 12px; color: var(--dim);
+  padding: 4px 8px; border-radius: 6px; background: var(--panel-3);
+}
+.notif .digest-item .who { color: var(--text); font-weight: 600; flex: none; }
+.notif .digest-item .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag.digest { background: #4ade802e; color: #86efac; }
