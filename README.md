@@ -1,5 +1,11 @@
 # Team Chat
 
+> **17-695 A1 submission.** The six required pieces are in [`submission/`](submission/):
+> the as-built diagram (Step 1), the alternative design (Step 2), the prediction and change
+> record (Steps 3–4), the reflection (Step 5), and `submission/transcripts/`. The project
+> code is this repository — `server/`, `public/`, `tests/`. Run `npm test`; nothing to install.
+
+
 A small team-chat web app: public channels, direct messages, @mentions, per-channel
 unread counts, channel mutes, and quiet hours.
 
