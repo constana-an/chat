@@ -3,3 +3,6 @@ data/db.json
 
 # 提交用的压缩包不进仓库
 *.zip
+
+# macOS 垃圾文件
+.DS_Store
