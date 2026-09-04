@@ -125,7 +125,11 @@ live server with a 3-second snooze — `muted` flipped on its own, and the only 
 
 **Rounds of instruction:** one pass, no rework. Tests passed first run.
 
-**Where I intervened:** *(yours — what you pushed back on or redirected)*
+**Where I intervened:** Before this change was written, I confirmed the prediction that a
+lapsed snooze would leave the interface stale. That is why the client timer was treated as
+required work rather than optional polish — and it turned out to be the largest part of the
+change. Without it the server would have expired the mute silently and the sidebar would have
+kept showing 🔕 for the rest of the hour.
 
 **What was easy, what was hard**
 
@@ -168,7 +172,17 @@ implement.
 **Rounds of instruction:** two. The first produced everything above and passed. The second
 was forced by the restart test.
 
-**Where I intervened:** *(yours)*
+**Where I intervened:** Not in the implementation — I set the framing and let it run. My one
+substantive intervention in this stretch was during the prediction phase: I rejected the claim
+that the derived design's cost is processing. Checked against the code, that was right — with
+a 500-message cap per conversation and a handful of users, re-deriving an inbox is microseconds,
+and the argument being made was a scale argument that does not apply here. **It did not change
+how this requirement was built; it changed the cost recorded on the alternative design (note 3),
+from performance to retroactivity.**
+
+The consequence of standing back is worth recording too: the durability bug above was surfaced
+by the restart test, not by me or the agent reading the code. Nobody was going to notice a
+250 ms debounce by inspection.
 
 **What was easy, what was hard**
 
@@ -203,7 +217,8 @@ was forced by the restart test.
 **Rounds of instruction:** two. The second was forced by two failing tests, one of which
 was a real bug.
 
-**Where I intervened:** *(yours)*
+**Where I intervened:** I did not. The instruction was to carry on to the end of what could be
+done without me, and I checked the result rather than the process.
 
 **What was easy, what was hard**
 
